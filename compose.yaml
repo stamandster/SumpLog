@@ -1,0 +1,15 @@
+services:
+  sumplog:
+    build: .
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - sumplog-data:/app/data
+    environment:
+      PORT: 3000
+      DATABASE_URL: /app/data/sumplog.db
+      SUMPLOG_PASSWORD: ${SUMPLOG_PASSWORD:?Set an owner password of at least 12 characters}
+    restart: unless-stopped
+
+volumes:
+  sumplog-data:

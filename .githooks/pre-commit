@@ -1,0 +1,3 @@
+#!/bin/sh
+set -eu
+bun scripts/check-repository-privacy.ts

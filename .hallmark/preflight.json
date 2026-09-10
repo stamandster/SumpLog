@@ -1,0 +1,10 @@
+{
+  "scannedAt": "2026-09-01",
+  "framework": "React 19 + Vite + Tailwind CSS 4",
+  "backend": "Bun + Hono + Drizzle ORM + SQLite",
+  "fonts": "Bahnschrift display/body with Cascadia Code mono",
+  "palette": "OKLCH dark graphite surfaces with amber accent",
+  "spacing": "4-point custom-property scale",
+  "motion": "motion-cut; restrained CSS state transitions",
+  "preserve": ["palette", "font roles", "spacing scale", "side-rail application shell"]
+}

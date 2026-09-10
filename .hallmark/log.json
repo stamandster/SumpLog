@@ -1,0 +1,31 @@
+[
+  {
+    "date": "2026-09-02",
+    "macrostructure": "Workbench",
+    "theme": "custom",
+    "theme_axes": "dark / condensed-sans / warm-amber",
+    "vibe": "clean technical garage counter",
+    "enrichment": "user vehicle photography",
+    "brief": "Audit remediation: centered accessible dialogs, mobile fleet cards, structured task and fitment editors, honest status and recovery UI",
+    "preserve": "Approved design retained; functional refinement, not a new visual direction",
+    "validation": "Browser inspected at 320, 375, 414 and 768 CSS px. Core token contrast >=4.99:1 for body text."
+  },
+  {
+    "date": "2026-09-01",
+    "macrostructure": "Workbench",
+    "theme": "custom",
+    "theme_axes": "dark / condensed-sans / warm-amber",
+    "vibe": "clean technical garage counter",
+    "enrichment": "user vehicle photography",
+    "brief": "Complete SumpLog fleet, maintenance, reference, project, document, reminder, and export workflows"
+  },
+  {
+    "date": "2026-09-01",
+    "macrostructure": "Catalogue",
+    "theme": "custom",
+    "theme_axes": "dark / condensed-sans / warm-amber",
+    "vibe": "clean technical garage counter",
+    "enrichment": "inline vehicle SVG",
+    "brief": "SumpLog vehicle maintenance and parts dashboard"
+  }
+]
