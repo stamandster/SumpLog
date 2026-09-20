@@ -4,6 +4,24 @@ SumpLog is a free, self-hosted garage record for home mechanics and DIY car enth
 
 The current application is single-owner software. Multi-user and licensed business-mechanic features are future work and are not part of this release.
 
+## Windows quick start
+
+Install [Bun](https://bun.sh/), download or clone this repository, then open PowerShell in the SumpLog folder and run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\bootstrap.ps1 -OpenBrowser
+```
+
+On first run, the launcher asks you to create a 12+ character owner password, builds the app, and starts it in the background. It never adds demonstration records. It prints the local and verified LAN addresses plus the process ID used to stop the app.
+
+For another device on your trusted home network, allow the app through the Windows **Private** firewall profile in an elevated PowerShell window:
+
+```powershell
+New-NetFirewallRule -DisplayName "SumpLog (LAN)" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3000 -Profile Private -RemoteAddress LocalSubnet
+```
+
+For access away from home, prefer NetBird or Tailscale so SumpLog remains private; do not forward port 3000 from your router to the internet. See [Self-hosting](docs/SELF_HOSTING.md) for startup, stop, backup, and network guidance.
+
 ## What it includes
 
 - Unlimited vehicles, VIN decoding, editable vehicle details and photos, dated mileage readings, and mileage projections
@@ -37,7 +55,7 @@ bun run start
 
 Open `http://localhost:3000`.
 
-On Windows, `bootstrap.ps1` can build and start the production app in the background with LAN checks:
+On Windows, `bootstrap.ps1` can build and start the production app in the background with LAN checks and a first-run owner-password prompt:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\bootstrap.ps1 -OpenBrowser

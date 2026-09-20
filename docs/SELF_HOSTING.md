@@ -48,7 +48,7 @@ For a production-style background instance with a checked build and LAN address 
 powershell -NoProfile -ExecutionPolicy Bypass -File .\bootstrap.ps1 -OpenBrowser
 ```
 
-It reuses a healthy SumpLog already listening on the requested port; otherwise it installs locked dependencies, builds the app, starts it in the background, and prints the process ID, logs, local URL, and verified LAN URL. It never seeds, resets, or replaces garage data.
+It reuses a healthy SumpLog already listening on the requested port; otherwise it checks whether the local database already has an owner credential. On a first run it securely prompts for and confirms a 12+ character password. The server converts that initial value into a password hash stored in SQLite, so later launcher runs do not need the password again. It then installs locked dependencies, builds the app, starts it in the background, and prints the process ID, logs, local URL, and verified LAN URL. It never seeds, resets, or replaces garage data.
 
 To stop the instance, use the PID printed at startup:
 

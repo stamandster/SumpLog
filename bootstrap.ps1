@@ -57,6 +57,28 @@ function Show-SumpLogLinks {
     }
 }
 
+function Test-SumpLogOwnerPassword {
+    param([string]$DatabasePath, [string]$BunPath)
+    if (-not (Test-Path -LiteralPath $DatabasePath -PathType Leaf)) { return $false }
+    # Query only whether a credential exists; the password hash is never printed or read into PowerShell.
+    $sumpCredentialExists = & $BunPath -e 'import { Database } from "bun:sqlite"; const database = new Database(Bun.argv[1], { readonly: true }); try { process.stdout.write(database.query("SELECT 1 AS present FROM owner_credentials WHERE id = 1").get() ? "yes" : "no"); } finally { database.close(); }' $DatabasePath 2>$null
+    return $LASTEXITCODE -eq 0 -and ($sumpCredentialExists -join '').Trim() -eq 'yes'
+}
+
+function Read-SumpLogFirstPassword {
+    Write-Host 'First-run setup: create the SumpLog owner password.' -ForegroundColor Yellow
+    Write-Host 'Use at least 12 characters. It is stored as a password hash in your local garage database.'
+    while ($true) {
+        $first = Read-Host 'Owner password' -AsSecureString
+        $confirm = Read-Host 'Confirm owner password' -AsSecureString
+        $firstText = [System.Net.NetworkCredential]::new('', $first).Password
+        $confirmText = [System.Net.NetworkCredential]::new('', $confirm).Password
+        if ($firstText.Length -lt 12) { Write-Warning 'Use at least 12 characters.'; continue }
+        if ($firstText -cne $confirmText) { Write-Warning 'The passwords do not match.'; continue }
+        return $firstText
+    }
+}
+
 if (Test-SumpLog $sumpLocalUrl) {
     Write-Host "SumpLog is already running on port $Port; reusing it."
     Show-SumpLogLinks
@@ -79,8 +101,18 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $sumpBun -PathType Leaf
 
 $sumpPreviousHost = $env:HOST
 $sumpPreviousPort = $env:PORT
+$sumpPreviousPassword = $env:SUMPLOG_PASSWORD
 Push-Location -LiteralPath $sumpRoot
 try {
+    $sumpConfiguredDatabase = if ($env:DATABASE_URL) { $env:DATABASE_URL } else { Join-Path $sumpRoot 'data\sumplog.db' }
+    if (-not [System.IO.Path]::IsPathRooted($sumpConfiguredDatabase)) { $sumpConfiguredDatabase = Join-Path $sumpRoot $sumpConfiguredDatabase }
+    $sumpHasSavedPassword = Test-SumpLogOwnerPassword -DatabasePath $sumpConfiguredDatabase -BunPath $sumpBun
+    if (-not $sumpHasSavedPassword -and [string]::IsNullOrWhiteSpace($env:SUMPLOG_PASSWORD)) {
+        $env:SUMPLOG_PASSWORD = Read-SumpLogFirstPassword
+    }
+    if (-not $sumpHasSavedPassword -and $env:SUMPLOG_PASSWORD.Trim().Length -lt 12) {
+        throw 'First-run owner passwords must contain at least 12 characters.'
+    }
     Write-Host 'Checking dependencies...'
     & $sumpBun install --frozen-lockfile
     if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed. Server was not started.' }
@@ -120,5 +152,6 @@ try {
 } finally {
     $env:HOST = $sumpPreviousHost
     $env:PORT = $sumpPreviousPort
+    $env:SUMPLOG_PASSWORD = $sumpPreviousPassword
     Pop-Location
 }

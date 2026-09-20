@@ -4,7 +4,7 @@ import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypt
 
 type PasswordStore = { getHash: () => string | null; saveHash: (hash: string) => void };
 
-function hashPassword(password: string) {
+export function hashPassword(password: string) {
   const salt = randomBytes(16);
   return `scrypt$${salt.toString("base64")}$${scryptSync(password, salt, 64).toString("base64")}`;
 }
