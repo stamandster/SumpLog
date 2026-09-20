@@ -4,13 +4,9 @@
  */
 import { AlertTriangle, Bell, CarFront, Check, Download, LoaderCircle, Plus, Search } from "lucide-react";
 import { useEffect, useId, useRef } from "react";
-import type { Vehicle } from "../api";
-
-export type VehicleOption = Pick<Vehicle, "id" | "year" | "make" | "model" | "nickname">;
-
-export function vehicleLabel(vehicle: VehicleOption) {
-  return `${vehicle.year} ${vehicle.make} ${vehicle.model}${vehicle.nickname?.trim() ? ` · ${vehicle.nickname.trim()}` : ""}`;
-}
+import { vehicleLabel, type VehicleOption } from "../vehicleSearch";
+import { VehicleSearchSelect } from "./VehicleSearchSelect";
+export { vehicleLabel, type VehicleOption } from "../vehicleSearch";
 
 export function VehicleContext({ vehicles, vehicleId, onSelectVehicle, state = "default", className = "" }: {
   vehicles: VehicleOption[];
@@ -27,12 +23,7 @@ export function VehicleContext({ vehicles, vehicleId, onSelectVehicle, state = "
     <Icon size={20} className="vehicle-context__icon" aria-hidden="true" />
     <div className="vehicle-context__details">
       {canSwitch ? <label htmlFor={id}>Selected vehicle</label> : <span className="vehicle-context__label">Selected vehicle</span>}
-      {canSwitch ? <select id={id} value={vehicle?.id ?? ""} onChange={(event) => onSelectVehicle(Number(event.target.value))}
-        disabled={state === "disabled"} aria-disabled={state === "disabled"} aria-invalid={state === "error" || undefined}
-        aria-describedby={`${id}-help`} title={vehicle ? vehicleLabel(vehicle) : "Choose a vehicle"}>
-        {!vehicle && <option value="" disabled>Choose a vehicle</option>}
-        {vehicles.map((item) => <option key={item.id} value={item.id}>{vehicleLabel(item)} · #{item.id}</option>)}
-      </select> : <strong className="vehicle-context__name">{vehicle ? vehicleLabel(vehicle) : "No vehicle selected"}</strong>}
+      {canSwitch ? <VehicleSearchSelect id={id} vehicles={vehicles} value={vehicleId} onChange={onSelectVehicle} disabled={state === "disabled"} invalid={state === "error"} describedBy={`${id}-help`} /> : <strong className="vehicle-context__name">{vehicle ? vehicleLabel(vehicle) : "No vehicle selected"}</strong>}
       <span id={`${id}-help`} className={state === "error" ? "vehicle-context__error" : "sr-only"}>
         {state === "error" ? "Vehicle could not load. Retry or select another vehicle." : "Used for vehicle-specific pages and logging maintenance. Documents, fleet and settings are garage-wide."}
       </span>

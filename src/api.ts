@@ -56,7 +56,7 @@ export type MaintenanceRecord = {
 };
 
 export type MaintenanceAudit = { id: number; maintenanceId: number; operation: "Created" | "Updated" | "Voided" | "Restored"; summary: string | null; changedAt: string; beforeJson: string | null; afterJson: string };
-export type DocumentMaintenanceLink = { id: number; vehicleId: number | null; title: string; category: string; serviceDate: string };
+export type DocumentMaintenanceLink = { id: number; vehicleId: number | null; title: string; category: string; serviceDate: string; position?: number };
 export type DocumentRecord = { notes?: string | null; id: number; trackingId?: string | null; originalName?: string | null; vehicleId: number | null; maintenanceId: number | null; maintenanceIds?: number[]; maintenanceRecords?: DocumentMaintenanceLink[]; projectId?: number | null; insurancePolicyId?: number | null; kind: string; name: string; mimeType: string | null; sizeBytes: number | null; createdAt: string; vehicleName: string | null; maintenanceTitle: string | null; maintenanceCategory: string | null; serviceDate: string | null; insuranceProvider?: string | null; insurancePolicyNumber?: string | null };
 export type InsurancePolicy = { id: number; provider: string; policyNumber: string | null; agentName: string | null; agentPhone: string | null; effectiveAt: string | null; expiresAt: string | null; premiumCents: number | null; notes: string | null; vehicleIds: number[]; vehicles: Array<{ id: number; year: number; make: string; model: string; nickname: string | null }>; documentCount: number };
 export type InsuranceInput = { provider: string; policyNumber?: string; agentName?: string; agentPhone?: string; effectiveAt?: string; expiresAt?: string; premium?: number | null; notes?: string; vehicleIds: number[] };
@@ -195,7 +195,7 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   return body as T;
 }
 
-export type BackupPreview = { counts: Record<string, number>; warnings: string[] };
+export type BackupPreview = { counts: Record<string, number>; warnings: string[]; attachmentCount: number; attachmentBytes: number };
 export type RestoreResult = { ok: true; vehicles: number; warnings: string[]; backupUrl: string };
 
 export const api = {
@@ -221,6 +221,8 @@ export const api = {
     }),
   updateMaintenance: (maintenanceId: number, input: MaintenanceInput) =>
     request<MaintenanceRecord>(`/api/maintenance/${maintenanceId}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }),
+  reorderMaintenanceEvidence: (maintenanceId: number, documentIds: number[]) =>
+    request<{ ok: true; documentIds: number[] }>(`/api/maintenance/${maintenanceId}/evidence-order`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ documentIds }) }),
   maintenanceAudit: (maintenanceId: number) => request<MaintenanceAudit[]>(`/api/maintenance/${maintenanceId}/audit`),
   setMaintenanceVoided: (maintenanceId: number, voided: boolean) => request<MaintenanceRecord>(`/api/maintenance/${maintenanceId}/status`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ voided }) }),
   clearMaintenanceDue: (maintenanceId: number) => request<MaintenanceRecord>(`/api/maintenance/${maintenanceId}/due`, { method: "PATCH" }),
@@ -239,6 +241,7 @@ export const api = {
   },
   removeVehicleImage: (vehicleId: number) => request<{ ok: true }>(`/api/vehicles/${vehicleId}/image`, { method: "DELETE" }),
   mileage: (vehicleId: number) => request<MileageEntry[]>(`/api/vehicles/${vehicleId}/mileage`),
+  maintenanceOptions: () => request<import("./maintenanceOptions").MaintenanceOptions>("/api/maintenance/options"),
   addMileage: (vehicleId: number, input: MileageInput) => request<MileageEntry>(`/api/vehicles/${vehicleId}/mileage`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }),
   updateMileage: (id: number, input: MileageInput) => request<MileageEntry>(`/api/mileage/${id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }),
   documents: (filters: { vehicleId?: number; kind?: string; category?: string; from?: string; to?: string } = {}) => {

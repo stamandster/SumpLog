@@ -40,6 +40,32 @@ Invoke-RestMethod http://127.0.0.1:3000/api/health
 
 Expected fields are `ok: true` and `service: sumplog`.
 
+## Windows bootstrap script
+
+For a production-style background instance with a checked build and LAN address check, run the repository's `bootstrap.ps1` from its root:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\bootstrap.ps1 -OpenBrowser
+```
+
+It reuses a healthy SumpLog already listening on the requested port; otherwise it installs locked dependencies, builds the app, starts it in the background, and prints the process ID, logs, local URL, and verified LAN URL. It never seeds, resets, or replaces garage data.
+
+To stop the instance, use the PID printed at startup:
+
+```powershell
+Stop-Process -Id <PID>
+```
+
+If the startup window was closed, find and stop the process listening on the default SumpLog port:
+
+```powershell
+Get-NetTCPConnection -LocalPort 3000 -State Listen |
+  Select-Object -ExpandProperty OwningProcess |
+  ForEach-Object { Stop-Process -Id $_ }
+```
+
+Only use that fallback if port 3000 is dedicated to SumpLog; it intentionally stops whatever process owns that port. To use another port, start with `-Port 3001` and substitute that number in the lookup command.
+
 ## LAN access on Windows
 
 Find the private IPv4 address:
@@ -74,15 +100,15 @@ For deliberate LAN exposure, change the port mapping in `compose.yaml` from `127
 
 ## Backups
 
-Use Settings > Data & backups for routine backups. The JSON backup is the supported in-app restore format and includes uploaded assets. The ZIP/Excel export is for reading and migration, not restore.
+Use Settings > Data & backups > Full ZIP backup. It packages JSON records with original files and supports in-app restore. Legacy JSON backups remain importable. The separate readable Excel export is not a restore format.
 
 For a filesystem backup, stop SumpLog first and copy the SQLite database, its `-wal` and `-shm` companions if present, and the entire uploads directory. Copying a running WAL database without its companion files can produce an incomplete backup.
 
-Before an in-app restore, SumpLog creates `pre-restore-<uuid>.json` under a `backups` directory beside the database. Restore replaces all application tables and may replace asset paths; download the offered recovery backup after completion.
+Before an in-app restore, SumpLog creates `pre-restore-<uuid>.zip` under a `backups` directory beside the database. Restore replaces all garage tables and regenerates asset paths while preserving original file bytes, identifiers and record links. The owner credential table is retained, and browser preferences are unaffected. Download the offered recovery backup after completion; missing files in that recovery snapshot are reported. Existing upload files are not purged during restore.
 
 ## Updating
 
-1. Create a JSON backup and, for important garages, a stopped filesystem backup.
+1. Create a Full ZIP backup and, for important garages, a stopped filesystem backup.
 2. Install the updated code and dependencies.
 3. Run `bun run build`.
 4. Start SumpLog. Pending Drizzle migrations apply automatically.
@@ -102,11 +128,11 @@ Production requires either a saved owner credential in the database or a `SUMPLO
 
 ### Upload returns 500 or 422
 
-Check free disk space and permissions for `UPLOAD_DIRECTORY`. Individual files must be 15 MB or less and use a supported MIME type. The server request-body ceiling is 128 MB.
+Check free disk space and permissions for `UPLOAD_DIRECTORY`. Ordinary uploads must be 15 MB or less per file and use a supported MIME type. Backup restoration is exempt from that per-file cap and the server has no HTTP request-body size cap; keep it authenticated and restrict network access to trusted users.
 
 ### Restore is rejected
 
-Use a SumpLog format-version 2 or 3 JSON backup no larger than 120 MB. Run Check backup first and review warnings. Restore requires the exact confirmation `REPLACE`.
+Select the complete version 4 ZIP backup, or a legacy version 2/3 JSON file. Run Check backup first. Restore requires `REPLACE` and rejects missing/damaged attachments and unsafe archive entries. There are no backup byte or record-count caps. ZIP files are staged in the OS temporary directory and processed using streams; allow space there and in the data directory for the archive, extracted originals and recovery backup. JSON record parsing and multipart requests still require memory. Reverse proxies may need larger upload/time limits. For backups beyond host capacity, use the stopped-server procedure above.
 
 ### Health works but the interface is missing
 

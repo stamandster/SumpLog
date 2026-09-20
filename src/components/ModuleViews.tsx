@@ -1,4 +1,4 @@
-import { AlertTriangle, Ban, BookOpenText, CalendarClock, Camera, CarFront, Check, ClipboardCheck, Database, Download, FileText, Gauge, HardDrive, History, KeyRound, LogOut, Pencil, Plus, RotateCcw, Trash2, Upload, Wrench } from "lucide-react";
+import { AlertTriangle, Ban, BookOpenText, CalendarClock, Camera, CarFront, Check, ChevronDown, ClipboardCheck, Database, Download, FileText, Gauge, HardDrive, History, KeyRound, LogOut, Pencil, Plus, RotateCcw, Trash2, Upload, Wrench } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api, type AlertRecord, type DocumentRecord, type InsurancePolicy, type MaintenanceAudit, type MaintenanceRecord, type MileageEntry, type Part, type Project, type ReferenceSpec, type Reminder, type ServicePlan, type Vehicle } from "../api";
 import { useAction } from "../useAction";
@@ -9,10 +9,14 @@ import { PhotoEditor } from "./PhotoEditor";
 import { MaintenanceEvidence } from "./MaintenanceEvidence";
 import { ListSortControls } from "./ListSortControls";
 import { MileageChart } from "./MileageChart";
+import { readMaintenanceDetails, saveMaintenanceDetails } from "../maintenanceDetailsState";
 
 const money = { format: formatCurrency };
 const number = { format: formatNumber };
 const documentLinksTo = (document: DocumentRecord, maintenanceId: number) => document.maintenanceIds?.includes(maintenanceId) ?? document.maintenanceId === maintenanceId;
+const evidenceForRecord = (documents: DocumentRecord[], maintenanceId: number) => documents
+  .filter((document) => documentLinksTo(document, maintenanceId))
+  .sort((left, right) => (left.maintenanceRecords?.find((link) => link.id === maintenanceId)?.position ?? Number.MAX_SAFE_INTEGER) - (right.maintenanceRecords?.find((link) => link.id === maintenanceId)?.position ?? Number.MAX_SAFE_INTEGER) || left.createdAt.localeCompare(right.createdAt) || left.id - right.id);
 
 function SortButton({ label, active, descending, onClick }: { label: string; active: boolean; descending: boolean; onClick: () => void }) {
   return <button type="button" className="sort-toggle" data-active={active || undefined} aria-pressed={active} onClick={onClick}>{label}{active && <span aria-hidden="true">{descending ? "↓" : "↑"}</span>}<span className="sr-only">{active ? descending ? ", descending" : ", ascending" : ", sort"}</span></button>;
@@ -24,7 +28,7 @@ export function MaintenanceView({ records, plans, reminders, documents, onAdd, o
   const [showVoided, setShowVoided] = useState(false);
   const [plannerOpen, setPlannerOpen] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const [expandedRecordIds, setExpandedRecordIds] = useState<number[]>([]);
+  const [expandedRecordIds, setExpandedRecordIds] = useState<number[]>(() => typeof window === "undefined" ? [] : readMaintenanceDetails(new URL(window.location.href), window.history.state));
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState("date-desc");
   const [dateFrom, setDateFrom] = useState("");
@@ -36,15 +40,19 @@ export function MaintenanceView({ records, plans, reminders, documents, onAdd, o
   const [selectedReportIds, setSelectedReportIds] = useState<number[]>([]);
   const [linkedRecordIds, setLinkedRecordIds] = useState<number[]>([]);
   useEffect(() => {
-    const url = new URL(window.location.href); const recordId = Number(url.searchParams.get("record"));
+    const url = new URL(window.location.href);
     const linkedIds = [...new Set((url.searchParams.get("records") ?? "").split(",").map(Number).filter((id) => Number.isInteger(id) && records.some((record) => record.id === id)))];
     setLinkedRecordIds(linkedIds);
-    if (Number.isInteger(recordId) && records.some((record) => record.id === recordId)) setExpandedRecordIds((current) => current.includes(recordId) ? current : [...current, recordId]);
   }, [records]);
+  useEffect(() => {
+    const restore = () => setExpandedRecordIds(readMaintenanceDetails(new URL(window.location.href), window.history.state));
+    window.addEventListener("popstate", restore);
+    return () => window.removeEventListener("popstate", restore);
+  }, []);
   useEffect(() => {
     const recordId = Number(new URL(window.location.href).searchParams.get("record"));
     if (expandedRecordIds.includes(recordId)) document.getElementById(`maintenance-details-${recordId}`)?.scrollIntoView({ block: "center" });
-  }, [expandedRecordIds]);
+  }, [expandedRecordIds, records]);
   const categories = useMemo(() => [...new Set(records.map((record) => record.category).filter(Boolean))].sort(), [records]);
   const performers = useMemo(() => [...new Set(records.map((record) => record.shopName?.trim()).filter((value): value is string => Boolean(value)))].sort(), [records]);
   const usedParts = useMemo(() => [...new Map(records.flatMap((record) => record.parts ?? []).map((part) => [part.partId, part] as const)).values()].sort((a, b) => a.name.localeCompare(b.name)), [records]);
@@ -71,10 +79,15 @@ export function MaintenanceView({ records, plans, reminders, documents, onAdd, o
   const toggleVisibleReports = () => setSelectedReportIds((current) => selectedVisible ? current.filter((id) => !visibleRecords.some((record) => record.id === id)) : [...new Set([...current, ...visibleRecords.map((record) => record.id)])]);
   const allVisibleExpanded = visibleRecords.length > 0 && visibleRecords.every((record) => expandedRecordIds.includes(record.id));
   const anyVisibleExpanded = visibleRecords.some((record) => expandedRecordIds.includes(record.id));
-  const toggleRecordDetails = (id: number) => setExpandedRecordIds((current) => current.includes(id) ? current.filter((recordId) => recordId !== id) : [...current, id]);
-  const expandVisibleDetails = () => setExpandedRecordIds((current) => [...new Set([...current, ...visibleRecords.map((record) => record.id)])]);
-  const collapseVisibleDetails = () => setExpandedRecordIds((current) => current.filter((id) => !visibleRecords.some((record) => record.id === id)));
-  const clearLinkedRecords = () => { setLinkedRecordIds([]); const url = new URL(window.location.href); url.searchParams.delete("records"); url.searchParams.delete("record"); window.history.replaceState({}, "", url); };
+  const updateDetails = (ids: number[]) => {
+    const url = new URL(window.location.href);
+    window.history.replaceState(saveMaintenanceDetails(url, window.history.state, ids), "", url);
+    setExpandedRecordIds(ids);
+  };
+  const toggleRecordDetails = (id: number) => updateDetails(expandedRecordIds.includes(id) ? expandedRecordIds.filter((recordId) => recordId !== id) : [...expandedRecordIds, id]);
+  const expandVisibleDetails = () => updateDetails([...new Set([...expandedRecordIds, ...visibleRecords.map((record) => record.id)])]);
+  const collapseVisibleDetails = () => updateDetails(expandedRecordIds.filter((id) => !visibleRecords.some((record) => record.id === id)));
+  const clearLinkedRecords = () => { setLinkedRecordIds([]); const url = new URL(window.location.href); url.searchParams.delete("records"); url.searchParams.delete("record"); window.history.replaceState(saveMaintenanceDetails(url, window.history.state, expandedRecordIds), "", url); };
   const clearFilters = () => { setSearch(""); setDateFrom(""); setDateTo(""); setMileageBand(""); setPerformer(""); setPartId(""); setCategory(""); setShowVoided(false); clearLinkedRecords(); };
   const reportHref = (ids: number[]) => `/api/export/maintenance.pdf${ids.length ? `?ids=${ids.join(",")}` : ""}`;
   const toggleSort = (ascending: string, descending: string) => setSort((current) => current === ascending ? descending : ascending);
@@ -113,7 +126,7 @@ export function MaintenanceView({ records, plans, reminders, documents, onAdd, o
 }
 
 function MaintenanceRecordDetails({ record, documents, reportHref }: { record: MaintenanceRecord; documents: DocumentRecord[]; reportHref: string }) {
-  const files = documents.filter((document) => documentLinksTo(document, record.id));
+  const files = evidenceForRecord(documents, record.id);
   return <section id={`maintenance-details-${record.id}`} className="record-details"><header><div><h2>{record.title}</h2><p>{record.category} · {formatDate(record.serviceDate)} · {formatDistance(record.mileage)} · {money.format(record.costCents / 100)}</p></div><div className="header-actions"><a className="button button--primary button--small" href={reportHref} download><Download size={15} />Export PDF</a></div></header><dl className="maintenance-detail-metadata"><div><dt>Performed by</dt><dd>{record.shopName || "Not recorded"}</dd></div><div><dt>Labor</dt><dd>{record.laborHours} hours</dd></div><div><dt>Difficulty</dt><dd>{record.difficulty}/5</dd></div></dl>{record.notes && <div className="maintenance-detail-notes"><strong>Notes</strong><p>{record.notes}</p></div>}{record.parts?.length ? <div><strong>Parts used</strong><ul>{record.parts.map((part) => <li key={part.partId}>{part.usageMode === "Partial" && part.amountUsed != null ? `${part.amountUsed} ${part.amountUnit ?? ""} of ` : `${part.quantity} × `}{part.name} ({money.format(Math.round(part.quantity * part.unitCostCents) / 100)} used)</li>)}</ul></div> : null}<div><strong>Evidence & attachments</strong><MaintenanceEvidence files={files} /></div></section>;
 }
 
@@ -125,8 +138,8 @@ function AuditDetails({ row }: { row: MaintenanceAudit }) {
   return <details className="audit-details"><summary>Changed values</summary><dl>{fields.map((key) => <div key={key}><dt>{key.replace(/([A-Z])/g, " $1")}</dt><dd>{String(before[key] ?? "—")} → {String(after[key] ?? "—")}</dd></div>)}</dl></details>;
 }
 
-export function PartsView({ parts, vehicles, loading, onAdd, onEdit, onDeleteSelected }: { parts: Part[]; vehicles: Vehicle[]; loading: boolean; onAdd: () => void; onEdit: (part: Part) => void; onDeleteSelected: (parts: Part[]) => Promise<void> }) {
-  return <section className="module-page"><PartsCatalogue parts={parts} vehicles={vehicles} loading={loading} onAdd={onAdd} onEdit={onEdit} onDeleteSelected={onDeleteSelected} /></section>;
+export function PartsView({ parts, vehicles, loading, onAdd, onEdit, onClone, onDeleteSelected }: { parts: Part[]; vehicles: Vehicle[]; loading: boolean; onAdd: () => void; onEdit: (part: Part) => void; onClone?: (part: Part) => void; onDeleteSelected: (parts: Part[]) => Promise<void> }) {
+  return <section className="module-page"><PartsCatalogue parts={parts} vehicles={vehicles} loading={loading} onAdd={onAdd} onEdit={onEdit} onClone={onClone} onDeleteSelected={onDeleteSelected} /></section>;
 }
 
 export function SpecsView({ specs, vehicles, activeVehicleId, onAdd, onEdit, onClone, onAssign, onAddVehicle }: { specs: ReferenceSpec[]; vehicles: Vehicle[]; activeVehicleId: number | null; onAdd: () => void; onEdit: (spec: ReferenceSpec) => void; onClone: (spec: ReferenceSpec, vehicleId: number) => Promise<void>; onAssign: (spec: ReferenceSpec, vehicleId: number) => Promise<void>; onAddVehicle: () => void }) {
@@ -275,11 +288,17 @@ export function InsuranceView({ policies, documents, onAdd, onEdit, onAttach, on
   return <section className="module-page"><header className="module-header"><div><h1>Insurance</h1><p>Policies are garage records. Deleting a vehicle only unlinks it from a policy.</p></div><button className="button button--primary" onClick={onAdd}><Plus size={16} />Add policy</button></header>{action.error && <p className="form-error" role="alert">{action.error}</p>}{policies.length ? <div className="fleet-grid">{policies.map((policy) => { const attachments = documents.filter((document) => document.insurancePolicyId === policy.id); return <article className="panel fleet-card" key={policy.id}><div><span className="vehicle-nickname">Insurance policy</span><h2>{policy.provider}</h2><p>{policy.policyNumber ? `Policy ${policy.policyNumber}` : "Policy number not recorded"}</p></div><dl className="vehicle-facts"><div><dt>Linked vehicles</dt><dd>{policy.vehicles.length ? policy.vehicles.map((vehicle) => `${vehicle.year} ${vehicle.make} ${vehicle.model}`).join(", ") : "None"}</dd></div><div><dt>Expires</dt><dd>{policy.expiresAt ? formatDate(policy.expiresAt) : "Not recorded"}</dd></div><div><dt>Premium</dt><dd>{policy.premiumCents == null ? "Not recorded" : money.format(policy.premiumCents / 100)}</dd></div><div><dt>Agent</dt><dd>{policy.agentName ?? "Not recorded"}{policy.agentPhone ? ` · ${policy.agentPhone}` : ""}</dd></div></dl><div className="record-attachments">{attachments.map((document) => <div key={document.id}><a href={`/api/documents/${document.id}/file`} target="_blank" rel="noreferrer"><FileText size={14} />{document.name}</a><button className="icon-button" aria-label={`Delete ${document.name}`} onClick={() => { if (window.confirm(`Delete ${document.name}? This permanently removes the attached file.`)) void action.run(`delete-${document.id}`, () => onDeleteDocument(document)); }}><Trash2 size={14} /></button></div>)}</div><label className="button button--quiet accessible-upload"><Upload size={16} />Attach insurance document<input aria-label={`Attach document to ${policy.provider}`} type="file" accept="image/jpeg,image/png,image/webp,application/pdf,text/plain,text/csv,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.oasis.opendocument.text" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void action.run(`upload-${policy.id}`, () => onAttach(policy, file)); }} /></label><button className="button button--quiet fleet-card__edit" onClick={() => onEdit(policy)}><Pencil size={16} />Edit policy</button></article>; })}</div> : <div className="panel empty-inline"><FileText size={27} /><div><h2>No insurance policies</h2><p>Add a policy, then link the vehicle or vehicles it covers.</p></div><button className="button button--primary" onClick={onAdd}>Add policy</button></div>}</section>;
 }
 
-export function VehiclesView({ vehicles, policies, activeVehicleId, mileage, alerts, onSelect, onAdd, onEdit, onDelete, onAddMileage, onEditMileage, onChangePhoto, onRemovePhoto }: { vehicles: Vehicle[]; policies: InsurancePolicy[]; activeVehicleId: number | null; mileage: MileageEntry[]; alerts: AlertRecord[]; onSelect: (vehicleId: number) => void; onAdd: () => void; onEdit: () => void; onDelete: (vehicle: Vehicle) => void; onAddMileage: () => void; onEditMileage: (entry: MileageEntry) => void; onChangePhoto: (vehicleId: number, file: File) => Promise<void>; onRemovePhoto: (vehicleId: number) => Promise<void> }) {
+export function VehiclesView({ vehicles, policies, activeVehicleId, mileage, mileageLoading = false, initialExpandedVehicleId = null, alerts, onSelect, onAdd, onEdit, onDelete, onAddMileage, onEditMileage, onChangePhoto, onRemovePhoto }: { vehicles: Vehicle[]; policies: InsurancePolicy[]; activeVehicleId: number | null; mileage: MileageEntry[]; mileageLoading?: boolean; initialExpandedVehicleId?: number | null; alerts: AlertRecord[]; onSelect: (vehicleId: number) => void; onAdd: () => void; onEdit: () => void; onDelete: (vehicle: Vehicle) => void; onAddMileage: () => void; onEditMileage: (entry: MileageEntry) => void; onChangePhoto: (vehicleId: number, file: File) => Promise<void>; onRemovePhoto: (vehicleId: number) => Promise<void> }) {
   const action = useAction();
   
   const [editingPhoto, setEditingPhoto] = useState<{ vehicle: Vehicle; file?: File } | null>(null);
-  const activeVehicle = vehicles.find((vehicle) => vehicle.id === activeVehicleId);
+  const [expandedVehicleId, setExpandedVehicleId] = useState<number | null>(initialExpandedVehicleId);
+  useEffect(() => { setExpandedVehicleId(initialExpandedVehicleId); }, [initialExpandedVehicleId]);
+  useEffect(() => { if (activeVehicleId != null) setExpandedVehicleId((current) => current === activeVehicleId ? current : null); }, [activeVehicleId]);
+  const toggleDetails = (id: number) => {
+    setExpandedVehicleId((current) => current === id ? null : id);
+    if (id !== activeVehicleId) onSelect(id);
+  };
   return (
     <section className="module-page">
       <>{editingPhoto && <PhotoEditor kind="vehicles" id={editingPhoto.vehicle.id} file={editingPhoto.file} src={editingPhoto.vehicle.imageUrl ?? ""} initialZoom={editingPhoto.file ? 1 : editingPhoto.vehicle.photoZoom ?? 1} initialPositionX={editingPhoto.file ? 50 : editingPhoto.vehicle.photoPositionX ?? 50} initialPositionY={editingPhoto.file ? 50 : editingPhoto.vehicle.photoPositionY ?? 50} onClose={() => setEditingPhoto(null)} onSaved={() => {}} />}</><header className="module-header"><div><h1>Vehicles</h1></div><button className="button button--primary" onClick={onAdd}><Plus size={16} />Add vehicle</button></header>
@@ -287,14 +306,17 @@ export function VehiclesView({ vehicles, policies, activeVehicleId, mileage, ale
       <div className="fleet-grid">
         {vehicles.map((vehicle) => {
           const active = vehicle.id === activeVehicleId;
+          const expanded = expandedVehicleId === vehicle.id;
+          const detailsId = `vehicle-mileage-${vehicle.id}`;
           const vehiclePolicies = policies.filter((policy) => policy.vehicleIds.includes(vehicle.id));
           return (
-            <article className="panel fleet-card fleet-card--vehicle" key={vehicle.id} data-active={active || undefined}>
+            <article className="panel fleet-card fleet-card--vehicle" key={vehicle.id} data-active={active || undefined} data-expanded={expanded || undefined} onClick={(event) => { if (!(event.target as Element).closest("button, a, input, label, select, textarea, .fleet-card__details")) toggleDetails(vehicle.id); }}>
               <div className="fleet-card__media"><div className="fleet-card__photo">{vehicle.imageUrl ? <img src={`${vehicle.imageUrl}${vehicle.imageUrl.includes("?") ? "&" : "?"}preview=1`} alt={`${vehicle.year} ${vehicle.make} ${vehicle.model}`} loading="lazy" style={{ objectPosition: `${vehicle.photoPositionX ?? 50}% ${vehicle.photoPositionY ?? 50}%`, transformOrigin: `${vehicle.photoPositionX ?? 50}% ${vehicle.photoPositionY ?? 50}%`, transform: `scale(${vehicle.photoZoom ?? 1})` }} /> : <CarFront size={30} />}</div><div className="photo-actions"><label className="photo-upload" title="Upload vehicle photo"><Upload size={15} /><span>{vehicle.imageUrl ? "Change" : "Add photo"}</span><input type="file" aria-label={`Photo for ${vehicle.year} ${vehicle.make} ${vehicle.model}`} disabled={action.pending.has(`photo-${vehicle.id}`)} accept="image/jpeg,image/png,image/webp" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) setEditingPhoto({ vehicle, file }); }} /></label>{vehicle.imageUrl && <button type="button" className="photo-remove" onClick={() => setEditingPhoto({ vehicle })} aria-label={`Frame photo of ${vehicle.make} ${vehicle.model}`}><RotateCcw size={15} /></button>}{vehicle.imageUrl && <button type="button" className="photo-remove" disabled={action.pending.has(`photo-${vehicle.id}`)} onClick={() => { if (window.confirm("Remove this vehicle photo? The original photo on your device is not affected.")) void action.run(`photo-${vehicle.id}`, () => onRemovePhoto(vehicle.id)); }} aria-label={`Remove photo of ${vehicle.year} ${vehicle.make} ${vehicle.model}`}><Trash2 size={14} /></button>}</div></div>
               <div className="fleet-card__identity">
                 <span className="vehicle-nickname">{vehicle.nickname ?? "Garage vehicle"}</span>
-                <h2>{vehicle.year} {vehicle.make} {vehicle.model}</h2>
+                <h2><button type="button" className="fleet-card__toggle" aria-expanded={expanded} aria-controls={detailsId} onClick={() => toggleDetails(vehicle.id)}>{vehicle.year} {vehicle.make} {vehicle.model}<ChevronDown size={18} aria-hidden="true" /></button></h2>
                 <p>{vehicle.trim ?? "Trim not recorded"} · {formatDistance(vehicle.mileage)}</p>
+                <small className="fleet-card__hint">{expanded ? "Click to hide mileage details" : "Click to view mileage details"}</small>
               </div>
               <dl className="vehicle-facts">
                 <div><dt>Engine</dt><dd>{vehicle.engine ?? "—"}</dd></div>
@@ -306,17 +328,25 @@ export function VehiclesView({ vehicles, policies, activeVehicleId, mileage, ale
                 {vehiclePolicies.some((policy) => policy.expiresAt) && <div><dt>Policy expires</dt><dd>{vehiclePolicies.filter((policy) => policy.expiresAt).map((policy) => formatDate(policy.expiresAt!)).join(", ")}</dd></div>}
                 <div><dt>Yearly estimate</dt><dd>{vehicle.annualMileageEstimate != null ? formatDistance(vehicle.annualMileageEstimate) : "Calculating"}</dd></div>
               </dl>
-              <button className={active ? "button button--quiet" : "button button--primary"} onClick={() => onSelect(vehicle.id)} aria-current={active ? "true" : undefined}>
+              <div className="fleet-card__actions" role="group" aria-label={`Actions for ${vehicle.year} ${vehicle.make} ${vehicle.model}`}>
+              <button className={active ? "button button--quiet" : "button button--primary"} onClick={() => { setExpandedVehicleId(vehicle.id); if (!active) onSelect(vehicle.id); }} aria-current={active ? "true" : undefined}>
                 {active ? <><Check size={16} />Current vehicle</> : "Open vehicle"}
               </button>
               {active && <button className="button button--quiet fleet-card__edit" onClick={onEdit}><Pencil size={16} />Edit details</button>}
               <button type="button" className="button button--destructive-quiet" onClick={() => onDelete(vehicle)} aria-label={`Delete vehicle: ${vehicle.year} ${vehicle.make} ${vehicle.model}${vehicle.nickname ? ` · ${vehicle.nickname}` : ""}`}><Trash2 size={16} aria-hidden="true" />Delete vehicle</button>
+              </div>
+              <section id={detailsId} className="mileage-panel fleet-card__details" hidden={!expanded} aria-label={`Mileage for ${vehicle.year} ${vehicle.make} ${vehicle.model}`}>
+                {expanded && (active && !mileageLoading ? <>
+                  <header><h2>Mileage</h2><button className="button button--quiet" onClick={onAddMileage}><Gauge size={16} />Record mileage</button></header>
+                  <MileageChart vehicle={vehicle} entries={mileage.filter((entry) => entry.vehicleId === vehicle.id)} />
+                  <div className="mileage-list">{mileage.filter((entry) => entry.vehicleId === vehicle.id).map((entry) => <button className="mileage-entry" key={entry.id} onClick={() => onEditMileage(entry)}><time>{formatDate(entry.recordedDate)}</time><strong>{formatDistance(entry.mileage)}</strong><span>{entry.annualMileageEstimate != null ? `${formatDistance(entry.annualMileageEstimate)}/year` : "Estimate pending"}</span><Pencil size={14} /></button>)}</div>
+                </> : <p role="status">Loading mileage details…</p>)}
+              </section>
             </article>
           );
         })}
       </div>
       {alerts.length > 0 && <section className="panel alert-list"><header><AlertTriangle size={18} /><h2>Expiry and service alerts</h2></header>{alerts.map((alert) => <article key={alert.id} data-severity={alert.severity}><AlertTriangle size={16} /><div><strong>{alert.title}</strong><span>{alert.detail}</span></div></article>)}</section>}
-      {activeVehicle && <section className="panel mileage-panel"><header><div><h2>Mileage</h2></div><button className="button button--quiet" onClick={onAddMileage}><Gauge size={16} />Record mileage</button></header><MileageChart vehicle={activeVehicle} entries={mileage} /><div className="mileage-list">{mileage.filter((entry) => entry.vehicleId === activeVehicle.id).map((entry) => <button className="mileage-entry" key={entry.id} onClick={() => onEditMileage(entry)}><time>{formatDate(entry.recordedDate)}</time><strong>{formatDistance(entry.mileage)}</strong><span>{entry.annualMileageEstimate != null ? `${formatDistance(entry.annualMileageEstimate)}/year` : "Estimate pending"}</span><Pencil size={14} /></button>)}</div></section>}
     </section>
   );
 }
@@ -349,15 +379,16 @@ export function SettingsView({ density, onDensityChange, onImportBackup, authReq
         <p className="field-note">Distance values are converted for display and entry. Currency changes the label only; it does not convert existing amounts. Exports keep distances in miles and monetary values in the recorded currency.</p>
       </section>
       <section className="panel settings-panel" aria-labelledby="backup-settings-title">
-        <header><Database size={20} /><div><h2 id="backup-settings-title">Data & backups</h2><p>Download your entire garage as an Excel workbook with receipts, images and documents grouped into vehicle and service folders.</p></div></header>
-        <div className="settings-actions"><a className="button button--primary" href="/api/export/archive.zip" download><Download size={16} />Export ZIP (Excel + files)</a><a className="button button--quiet" href="/api/export/json" download><Download size={16} />Full JSON backup</a><a className="button button--quiet" href="/api/export/all.csv" download><Download size={16} />CSV summary</a></div>
-        <p className="field-note">Extract the whole ZIP, then open SumpLog.xlsx. The Files sheet links to your attachments. Missing files are flagged in the workbook and Read me.txt. Keep a JSON backup for restoring into SumpLog.</p>
+        <header><Database size={20} /><div><h2 id="backup-settings-title">Data & backups</h2><p>Back up and restore the entire garage, across all vehicles—not just the selected vehicle.</p></div></header>
+        <div className="settings-actions"><a className="button button--primary" href="/api/export/backup.zip" download><Download size={16} />Full ZIP backup</a><a className="button button--quiet" href="/api/export/archive.zip" download><Download size={16} />Readable export (Excel + files)</a><a className="button button--quiet" href="/api/export/all.csv" download><Download size={16} />CSV summary</a></div>
+        <p className="field-note">The restorable ZIP contains backup.json with all garage records and an assets folder with original photos, PDF receipts and other documents—not Base64 text. Shared maintenance links, attachment order, display names and image adjustments are preserved. Select the complete ZIP when restoring; do not extract it first.</p>
+        <p className="field-note">Existing JSON backups can still be restored. Excel and CSV exports are for reading, not restoring. Backups contain private garage information; store them securely off this machine. The owner password and this browser’s interface preferences are not included or changed by restore.</p>
         <div className="restore-panel">
-          <label htmlFor="restore-backup"><strong>Restore JSON backup</strong></label>
-          <p className="field-note">Restoring replaces the whole garage. A recovery backup is saved automatically before any records change. Maximum backup size: 120 MB. For larger garages, back up the complete data directory while the server is stopped.</p>
-          <input id="restore-backup" type="file" accept="application/json,.json" disabled={action.pending.size > 0} onChange={(event) => { setBackup(event.target.files?.[0] ?? null); setPreview(null); setResult(null); setConfirmation(""); action.clearError(); }} />
+          <label htmlFor="restore-backup"><strong>Restore ZIP or legacy JSON backup</strong></label>
+          <p className="field-note">Restoring replaces the whole garage, including attachments and their record links. A recovery backup is saved automatically before any records change. There is no app-imposed backup size limit; available memory, disk space and any reverse-proxy limits still apply. Large backups may take time to check and restore.</p>
+          <input id="restore-backup" type="file" accept="application/zip,.zip,application/json,.json" disabled={action.pending.size > 0} onChange={(event) => { setBackup(event.target.files?.[0] ?? null); setPreview(null); setResult(null); setConfirmation(""); action.clearError(); }} />
           <button className="button button--quiet" disabled={!backup || action.pending.size > 0} onClick={() => { if (backup) void action.run("preview", async () => setPreview(await api.previewBackup(backup))); }}>{action.pending.has("preview") ? "Checking…" : "Check backup"}</button>
-          {preview && <div className="restore-preview"><h3>Backup contents</h3><dl>{Object.entries(preview.counts).map(([table, count]) => <div key={table}><dt>{table.replace(/([A-Z])/g, " $1")}</dt><dd>{formatNumber(count)}</dd></div>)}</dl>{preview.warnings.map((warning, index) => <p className="form-error" key={index}>{warning}</p>)}<label className="field"><span>Type REPLACE to confirm</span><input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} autoComplete="off" disabled={action.pending.size > 0} /></label><button className="button button--danger" disabled={confirmation !== "REPLACE" || action.pending.size > 0} onClick={() => { if (backup) void action.run("restore", async () => { const restored = await onImportBackup(backup); setResult(restored); setPreview(null); setBackup(null); setConfirmation(""); }); }}>{action.pending.has("restore") ? "Restoring…" : "Replace garage"}</button></div>}
+          {preview && <div className="restore-preview"><h3>Backup contents</h3><p>{formatNumber(preview.attachmentCount)} embedded original files · {formatNumber(preview.attachmentBytes)} bytes</p><dl>{Object.entries(preview.counts).map(([table, count]) => <div key={table}><dt>{table.replace(/([A-Z])/g, " $1")}</dt><dd>{formatNumber(count)}</dd></div>)}</dl>{preview.warnings.map((warning, index) => <p className="form-error" key={index}>{warning}</p>)}{preview.warnings.length > 0 && <p role="alert">Restore is blocked until all attachments are available.</p>}<label className="field"><span>Type REPLACE to confirm</span><input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} autoComplete="off" disabled={action.pending.size > 0} /></label><button className="button button--danger" disabled={confirmation !== "REPLACE" || action.pending.size > 0 || preview.warnings.length > 0} onClick={() => { if (backup) void action.run("restore", async () => { const restored = await onImportBackup(backup); setResult(restored); setPreview(null); setBackup(null); setConfirmation(""); }); }}>{action.pending.has("restore") ? "Restoring…" : "Replace garage"}</button></div>}
           {result && <div role="status"><p>Restored {result.vehicles} vehicle{result.vehicles === 1 ? "" : "s"}.</p><a className="button button--quiet" href={result.backupUrl}><Download size={16} />Recovery backup</a>{result.warnings.map((warning, index) => <p key={index}>{warning}</p>)}</div>}
         </div>
       </section>

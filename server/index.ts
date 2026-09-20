@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { db } from "./db/client";
 import { migrateDatabase } from "./db/migrate";
 import { ownerCredentials } from "./db/schema";
+import { maxRequestBodySize } from "./requestLimits";
 
 migrateDatabase();
 
@@ -19,7 +20,7 @@ console.info(`SumpLog running at http://localhost:${port}`);
 export default {
   port,
   hostname: password || hasSavedPassword ? (process.env.HOST ?? "0.0.0.0") : "127.0.0.1",
-  maxRequestBodySize: 128 * 1024 * 1024,
+  maxRequestBodySize,
   idleTimeout: 120,
   fetch: app.fetch,
 };

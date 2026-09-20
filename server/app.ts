@@ -252,7 +252,7 @@ const partInput = z.object({
   supplierName: z.string().trim().max(120).optional().or(z.literal("")),
   supplierUrl: z.union([z.literal(""), z.url().refine((value) => /^https?:\/\//i.test(value), "Use an HTTP or HTTPS supplier link.")]).optional(),
   purchasePrice: z.coerce.number().min(0).max(1_000_000).default(0),
-  quantity: z.coerce.number().int().min(0).max(1_000_000).default(0),
+  quantity: z.coerce.number().min(0).max(1_000_000).default(0),
   volumePerUnit: z.union([z.coerce.number().positive().max(1_000_000), z.literal(""), z.null()]).optional(),
   volumeUnit: z.string().trim().max(24).optional().or(z.literal("")),
   minimumQuantity: z.coerce.number().int().min(0).max(1_000_000).default(0),
@@ -262,7 +262,7 @@ const partInput = z.object({
   previousVehicleId: z.union([z.coerce.number().int().positive(), z.null()]).optional(),
   fitmentNotes: z.string().trim().max(500).optional().or(z.literal("")),
   fitments: z.array(z.object({ vehicleId: z.coerce.number().int().positive(), notes: z.string().trim().max(500).optional().default("") })).max(100).optional(),
-});
+}).refine((input) => input.itemType === "Consumable" || Number.isInteger(input.quantity), { message: "Use a whole stock quantity for parts.", path: ["quantity"] });
 
 async function getPart(partId: number, vehicleId?: number | null) {
   const [row] = await db.select().from(parts).where(eq(parts.id, partId)).limit(1);
@@ -913,6 +913,13 @@ app.delete("/api/parts/:id", async (c) => {
   }
 });
 
+app.get("/api/maintenance/options", (c) => {
+  const records = db.select({ category: maintenanceRecords.category, shop: maintenanceRecords.shopName }).from(maintenanceRecords).all();
+  const plans = db.select({ category: servicePlans.category }).from(servicePlans).all();
+  const choices = (values: Array<string | null>) => [...new Set(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value)))].sort((a, b) => a.localeCompare(b));
+  return c.json({ systems: choices([...records, ...plans].map((row) => row.category)), shops: choices(records.map((row) => row.shop)) });
+});
+
 app.get("/api/vehicles/:id/maintenance", async (c) => {
   const vehicleId = Number(c.req.param("id"));
   const rows = await db
@@ -927,6 +934,14 @@ app.get("/api/vehicles/:id/maintenance", async (c) => {
   return c.json(enriched);
 });
 
+function nextMaintenanceEvidencePosition(tx: any, maintenanceId: number) {
+  const row = tx.select({ position: sql<number>`coalesce(max(${documentMaintenanceLinks.position}), -1)` })
+    .from(documentMaintenanceLinks)
+    .where(eq(documentMaintenanceLinks.maintenanceId, maintenanceId))
+    .get();
+  return Number(row?.position ?? -1) + 1;
+}
+
 function maintenanceSnapshot(tx: any, record: typeof maintenanceRecords.$inferSelect) {
   return JSON.stringify({ ...record, parts: tx.select().from(maintenanceParts).where(eq(maintenanceParts.maintenanceId, record.id)).all().map(({ partId, quantity, unitCostCents, usageMode, amountUsed, amountUnit }: typeof maintenanceParts.$inferSelect) => ({ partId, quantity, unitCostCents, usageMode, amountUsed, amountUnit })) });
 }
@@ -938,15 +953,26 @@ async function validateMaintenancePartUsage(selections: Array<{ partId: number; 
     if (selection.usageMode === "Whole" && !Number.isInteger(selection.quantity)) return `Use a whole number of units for ${part.name}.`;
     if (selection.usageMode === "Partial") {
       if (part.itemType !== "Consumable" || !part.volumePerUnit || !part.volumeUnit) return `${part.name} needs a volume per unit before partial use can be recorded.`;
-      if (!selection.amountUsed || selection.amountUsed > part.volumePerUnit) return `Enter a partial amount up to ${part.volumePerUnit} ${part.volumeUnit} for ${part.name}.`;
+      if (!selection.amountUsed || selection.amountUsed <= 0) return `Enter the total amount used in ${part.volumeUnit} for ${part.name}.`;
       if (selection.amountUnit && selection.amountUnit !== part.volumeUnit) return `Use ${part.volumeUnit} when recording partial use of ${part.name}.`;
     }
   }
   return null;
 }
 
+function adjustMaintenanceStock(tx: any, partId: number, additionalUsed: number) {
+  if (Math.abs(additionalUsed) < 1e-8) return;
+  const part = tx.select().from(parts).where(eq(parts.id, partId)).get();
+  if (!part) throw new WorkflowConflict("A selected inventory item no longer exists.");
+  const remaining = Math.round((part.quantity - additionalUsed) * 1e8) / 1e8;
+  if (remaining < 0) throw new WorkflowConflict(`Not enough ${part.name} in stock (${part.quantity} units available). Update its stock or reduce the amount used.`);
+  tx.update(parts).set({ quantity: remaining, updatedAt: sql`CURRENT_TIMESTAMP` }).where(eq(parts.id, partId)).run();
+}
+
 function attachMaintenanceParts(tx: any, maintenanceId: number, vehicleId: number, selections: Array<{ partId: number; quantity: number; usageMode: "Whole" | "Partial"; amountUsed?: number | null; amountUnit?: string | null }>, baseCostCents: number) {
   const previousParts = tx.select().from(maintenanceParts).where(eq(maintenanceParts.maintenanceId, maintenanceId)).all();
+  const record = tx.select().from(maintenanceRecords).where(eq(maintenanceRecords.id, maintenanceId)).get();
+  const nextQuantities = new Map<number, number>();
   tx.delete(maintenanceParts).where(eq(maintenanceParts.maintenanceId, maintenanceId)).run();
   let partsCostCents = 0;
   for (const selection of selections) {
@@ -957,7 +983,7 @@ function attachMaintenanceParts(tx: any, maintenanceId: number, vehicleId: numbe
     let amountUnit: string | null = null;
     if (selection.usageMode === "Partial") {
       if (part.itemType !== "Consumable" || !part.volumePerUnit || !part.volumeUnit) throw new Error(`${part.name} needs a volume per unit before partial use can be recorded.`);
-      if (!selection.amountUsed || selection.amountUsed > part.volumePerUnit) throw new Error(`Enter a partial amount up to ${part.volumePerUnit} ${part.volumeUnit} for ${part.name}.`);
+      if (!selection.amountUsed || selection.amountUsed <= 0) throw new Error(`Enter the total amount used in ${part.volumeUnit} for ${part.name}.`);
       if (selection.amountUnit && selection.amountUnit !== part.volumeUnit) throw new Error(`Use ${part.volumeUnit} when recording partial use of ${part.name}.`);
       amountUsed = selection.amountUsed;
       amountUnit = part.volumeUnit;
@@ -967,7 +993,15 @@ function attachMaintenanceParts(tx: any, maintenanceId: number, vehicleId: numbe
     }
     const unitCostCents = previousParts.find((entry: { partId: number }) => entry.partId === selection.partId)?.unitCostCents ?? part.purchasePriceCents;
     partsCostCents += Math.round(quantity * unitCostCents);
+    nextQuantities.set(selection.partId, quantity);
     tx.insert(maintenanceParts).values({ maintenanceId, partId: selection.partId, quantity, unitCostCents, usageMode: selection.usageMode, amountUsed, amountUnit }).run();
+  }
+  if (!record?.voidedAt) {
+    const previous = new Map<number, number>(previousParts.map((entry: { partId: number; quantity: number }) => [entry.partId, entry.quantity]));
+    // Apply only the difference: repeated saves and attachment reordering do not consume stock again.
+    for (const partId of new Set([...previous.keys(), ...nextQuantities.keys()])) {
+      adjustMaintenanceStock(tx, partId, (nextQuantities.get(partId) ?? 0) - (previous.get(partId) ?? 0));
+    }
   }
   tx.update(maintenanceRecords).set({ costCents: baseCostCents + partsCostCents }).where(eq(maintenanceRecords.id, maintenanceId)).run();
   return partsCostCents;
@@ -1129,9 +1163,10 @@ app.post("/api/vehicles/:id/maintenance-bundle", async (c) => {
     syncMaintenanceReminder(tx, created);
       recordServiceOdometer(tx, vehicleId, input.serviceDate, input.mileage);
       tx.insert(maintenanceAuditLogs).values({ maintenanceId: created.id, operation: "Created", afterJson: maintenanceSnapshot(tx, created), summary: `Maintenance record created with ${bundle.stored.length} attachment${bundle.stored.length === 1 ? "" : "s"}.` }).run();
+      let evidencePosition = nextMaintenanceEvidencePosition(tx, created.id);
       for (const { file, path, kind, name, rotation } of bundle.stored) {
         const attached = tx.insert(documents).values({ trackingId: crypto.randomUUID(), originalName: file.name.slice(0, 240), photoRotation: rotation ?? 0, vehicleId, maintenanceId: created.id, kind, name: name.slice(0, 240), storagePath: path, mimeType: file.type.split(";", 1)[0].toLowerCase(), sizeBytes: file.size }).returning({ id: documents.id }).get();
-        tx.insert(documentMaintenanceLinks).values({ documentId: attached.id, maintenanceId: created.id }).run();
+        tx.insert(documentMaintenanceLinks).values({ documentId: attached.id, maintenanceId: created.id, position: evidencePosition++ }).run();
       }
       return created;
     });
@@ -1158,9 +1193,10 @@ app.put("/api/maintenance/:id/bundle", async (c) => {
       recordServiceOdometer(tx, existing.vehicleId, input.serviceDate, input.mileage);
       const changedFields = Object.keys(updated).filter((key) => JSON.stringify(existing[key as keyof typeof existing]) !== JSON.stringify(updated[key as keyof typeof updated]) && !["updatedAt", "createdAt"].includes(key));
       tx.insert(maintenanceAuditLogs).values({ maintenanceId, operation: "Updated", beforeJson: beforeSnapshot, afterJson: maintenanceSnapshot(tx, updated), summary: `${changedFields.length ? `Changed ${changedFields.join(", ")}. ` : ""}Added ${bundle.stored.length} attachment${bundle.stored.length === 1 ? "" : "s"}.` }).run();
+      let evidencePosition = nextMaintenanceEvidencePosition(tx, maintenanceId);
       for (const { file, path, kind, name, rotation } of bundle.stored) {
         const attached = tx.insert(documents).values({ trackingId: crypto.randomUUID(), originalName: file.name.slice(0, 240), photoRotation: rotation ?? 0, vehicleId: existing.vehicleId, maintenanceId, kind, name: name.slice(0, 240), storagePath: path, mimeType: file.type.split(";", 1)[0].toLowerCase(), sizeBytes: file.size }).returning({ id: documents.id }).get();
-        tx.insert(documentMaintenanceLinks).values({ documentId: attached.id, maintenanceId }).run();
+        tx.insert(documentMaintenanceLinks).values({ documentId: attached.id, maintenanceId, position: evidencePosition++ }).run();
       }
       return updated;
     });
@@ -1184,6 +1220,10 @@ app.patch("/api/maintenance/:id/status", async (c) => {
   if (!existing) return c.json({ error: "Maintenance record not found." }, 404);
   const voidedAt = parsed.data.voided ? new Date().toISOString() : null;
   const updated = db.transaction((tx) => {
+    if (Boolean(existing.voidedAt) !== parsed.data.voided) {
+      const usage = tx.select().from(maintenanceParts).where(eq(maintenanceParts.maintenanceId, maintenanceId)).all();
+      for (const entry of usage) adjustMaintenanceStock(tx, entry.partId, parsed.data.voided ? -entry.quantity : entry.quantity);
+    }
     const [record] = tx.update(maintenanceRecords).set({ voidedAt, updatedAt: sql`CURRENT_TIMESTAMP` }).where(eq(maintenanceRecords.id, maintenanceId)).returning().all();
     tx.insert(maintenanceAuditLogs).values({ maintenanceId, operation: parsed.data.voided ? "Voided" : "Restored", beforeJson: JSON.stringify(existing), afterJson: JSON.stringify(record), summary: parsed.data.voided ? "Maintenance record voided." : "Maintenance record restored." }).run();
     return record;
@@ -1314,9 +1354,38 @@ async function validateDocumentMaintenanceLinks(vehicleId: number | null, mainte
 }
 
 function replaceDocumentMaintenanceLinks(tx: any, documentId: number, maintenanceIds: number[]) {
+  const existing = new Map(tx.select({ maintenanceId: documentMaintenanceLinks.maintenanceId, position: documentMaintenanceLinks.position }).from(documentMaintenanceLinks).where(eq(documentMaintenanceLinks.documentId, documentId)).all().map((row: { maintenanceId: number; position: number }) => [row.maintenanceId, row.position]));
   tx.delete(documentMaintenanceLinks).where(eq(documentMaintenanceLinks.documentId, documentId)).run();
-  if (maintenanceIds.length) tx.insert(documentMaintenanceLinks).values(maintenanceIds.map((maintenanceId) => ({ documentId, maintenanceId }))).run();
+  const nextByMaintenance = new Map<number, number>();
+  if (maintenanceIds.length) tx.insert(documentMaintenanceLinks).values(maintenanceIds.map((maintenanceId) => {
+    const currentPosition = existing.get(maintenanceId);
+    if (currentPosition != null) return { documentId, maintenanceId, position: currentPosition };
+    const next = nextByMaintenance.get(maintenanceId) ?? nextMaintenanceEvidencePosition(tx, maintenanceId);
+    nextByMaintenance.set(maintenanceId, next + 1);
+    return { documentId, maintenanceId, position: next };
+  })).run();
 }
+
+app.put("/api/maintenance/:id/evidence-order", async (c) => {
+  const maintenanceId = Number(c.req.param("id"));
+  const parsed = z.object({ documentIds: z.array(z.coerce.number().int().positive()).max(500) }).safeParse(await c.req.json().catch(() => null));
+  if (!Number.isInteger(maintenanceId) || !parsed.success || new Set(parsed.data.documentIds).size !== parsed.data.documentIds.length) return c.json({ error: "Choose a valid evidence order." }, 422);
+  const [record] = await db.select({ id: maintenanceRecords.id }).from(maintenanceRecords).where(eq(maintenanceRecords.id, maintenanceId)).limit(1);
+  if (!record) return c.json({ error: "Maintenance record not found." }, 404);
+  const links = await db.select({ documentId: documentMaintenanceLinks.documentId, position: documentMaintenanceLinks.position }).from(documentMaintenanceLinks).where(eq(documentMaintenanceLinks.maintenanceId, maintenanceId)).orderBy(asc(documentMaintenanceLinks.position), asc(documentMaintenanceLinks.documentId));
+  const linkedIds = new Set(links.map((link) => link.documentId));
+  if (parsed.data.documentIds.some((documentId) => !linkedIds.has(documentId))) return c.json({ error: "Every file in the new order must be attached to this maintenance record." }, 422);
+  const requested = new Set(parsed.data.documentIds);
+  const orderedIds = [...parsed.data.documentIds, ...links.filter((link) => !requested.has(link.documentId)).map((link) => link.documentId)];
+  db.transaction((tx) => {
+    const changed = orderedIds.some((documentId, position) => links[position]?.documentId !== documentId);
+    if (!changed) return;
+    for (const [position, documentId] of orderedIds.entries()) tx.update(documentMaintenanceLinks).set({ position }).where(and(eq(documentMaintenanceLinks.documentId, documentId), eq(documentMaintenanceLinks.maintenanceId, maintenanceId))).run();
+    const current = tx.select().from(maintenanceRecords).where(eq(maintenanceRecords.id, maintenanceId)).get();
+    if (current) tx.insert(maintenanceAuditLogs).values({ maintenanceId, operation: "Updated", summary: `Reordered ${orderedIds.length} evidence attachment${orderedIds.length === 1 ? "" : "s"}.`, afterJson: maintenanceSnapshot(tx, current) }).run();
+  });
+  return c.json({ ok: true, documentIds: orderedIds });
+});
 
 app.post("/api/documents", async (c) => {
   const body = await c.req.parseBody();
@@ -1396,10 +1465,10 @@ app.get("/api/documents", async (c) => {
     .leftJoin(insurancePolicies, eq(documents.insurancePolicyId, insurancePolicies.id))
     .where(filters.length ? and(...(filters as Parameters<typeof and>)) : undefined)
     .orderBy(desc(documents.createdAt));
-  const linkedRows = await db.select({ documentId: documentMaintenanceLinks.documentId, id: maintenanceRecords.id, vehicleId: maintenanceRecords.vehicleId, title: maintenanceRecords.title, category: maintenanceRecords.category, serviceDate: maintenanceRecords.serviceDate })
+  const linkedRows = await db.select({ documentId: documentMaintenanceLinks.documentId, position: documentMaintenanceLinks.position, id: maintenanceRecords.id, vehicleId: maintenanceRecords.vehicleId, title: maintenanceRecords.title, category: maintenanceRecords.category, serviceDate: maintenanceRecords.serviceDate })
     .from(documentMaintenanceLinks)
     .innerJoin(maintenanceRecords, eq(documentMaintenanceLinks.maintenanceId, maintenanceRecords.id))
-    .orderBy(desc(maintenanceRecords.serviceDate), desc(maintenanceRecords.id));
+    .orderBy(desc(maintenanceRecords.serviceDate), desc(maintenanceRecords.id), asc(documentMaintenanceLinks.position));
   const enriched = rows.map((row) => {
     const linked = linkedRows.filter((link) => link.documentId === row.id).map(({ documentId: _documentId, ...link }) => link);
     const primary = linked.find((link) => link.id === row.maintenanceId) ?? linked[0];

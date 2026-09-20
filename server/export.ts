@@ -33,6 +33,18 @@ function documentBelongsToMaintenance(data: ExportData, documentId: number, main
   return data.documentMaintenanceLinks.some((link) => link.documentId === documentId && link.maintenanceId === maintenanceId) || (!data.documentMaintenanceLinks.some((link) => link.documentId === documentId) && legacyMaintenanceId === maintenanceId);
 }
 
+/** Link positions belong to one service record, allowing shared files to appear in a different sequence elsewhere. */
+function maintenanceEvidence(data: ExportData, maintenanceId: number) {
+  const position = new Map(data.documentMaintenanceLinks.filter((link) => link.maintenanceId === maintenanceId).map((link) => [link.documentId, link.position]));
+  return data.documents
+    .filter((item) => documentBelongsToMaintenance(data, item.id, maintenanceId, item.maintenanceId))
+    .sort((a, b) => (position.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (position.get(b.id) ?? Number.MAX_SAFE_INTEGER) || a.createdAt.localeCompare(b.createdAt) || a.id - b.id);
+}
+
+function reportEvidence(data: ExportData, maintenanceId: number) {
+  return maintenanceEvidence(data, maintenanceId).sort((a, b) => Number(b.kind === "Receipt" && a.mimeType === "application/pdf") - Number(a.kind === "Receipt" && b.mimeType === "application/pdf"));
+}
+
 /** Portable Windows-safe path component. IDs separately guarantee unique archive names. */
 export function exportName(value: string, maxLength = 48) {
   let name = value.normalize("NFC").replace(/[<>:"/\\|?*\u0000-\u001f\u007f]/g, "-").replace(/\s+/g, " ").replace(/^[. ]+|[. ]+$/g, "");
@@ -163,7 +175,7 @@ export function buildExportWorkbook(data: ExportData, layout: ReturnType<typeof 
   addSheet(workbook, "Insurance", ["Policy ID", "Provider", "Policy number", "Linked vehicles", "Agent", "Phone", "Effective date", "Expiry date", "Premium", "Notes", "Folder"], data.insurancePolicies.map((policy) => [policy.id, policy.provider, policy.policyNumber, data.insurancePolicyVehicles.filter((link) => link.insurancePolicyId === policy.id).map((link) => vehicle(link.vehicleId)).join("; "), policy.agentName, policy.agentPhone, date(policy.effectiveAt), date(policy.expiresAt), money(policy.premiumCents), policy.notes, link(`${layout.insuranceFolders.get(policy.id)}/Policy.txt`, "Open policy summary")]));
   addSheet(workbook, "Maintenance", ["Service ID", "Vehicle", "Service date", "Title", "System", "Mileage (mi)", "Cost", "Labor hours", "Difficulty (1-5)", "Shop", "Status", "Next due date", "Next due mileage (mi)", "Notes", "Record and attachments"], data.maintenance.map((r) => [r.id, vehicle(r.vehicleId), date(r.serviceDate), r.title, r.category, r.mileage, money(r.costCents), r.laborHours, r.difficulty, r.shopName, r.voidedAt ? "Voided" : "Active", date(r.nextDueDate), r.nextDueMileage, r.notes, link(`${layout.serviceFolders.get(r.id)}/Service record.txt`, "Open service folder summary")]));
   addSheet(workbook, "Files", ["File ID", "Tracking UUID", "Display name", "Original filename", "Vehicle", "Service ID", "Service title", "Project", "Insurance policy", "Type", "Status", "Size (bytes)", "Uploaded date", "File path"], layout.files.map((f) => [f.id, f.trackingId, f.name, f.originalName, vehicle(f.vehicleId), f.maintenanceId, serviceNames.get(f.maintenanceId ?? -1) ?? "", projectNames.get(f.projectId ?? -1) ?? "", data.insurancePolicies.find((policy) => policy.id === f.insurancePolicyId)?.provider ?? "", f.kind, f.status, f.size, date(f.date), f.status === "Included" ? link(f.path) : f.path]));
-  addSheet(workbook, "File service links", ["File ID", "Service ID", "Service title"], data.documentMaintenanceLinks.map((row) => [row.documentId, row.maintenanceId, serviceNames.get(row.maintenanceId) ?? ""]));
+  addSheet(workbook, "File service links", ["File ID", "Service ID", "Service title", "Evidence position"], data.documentMaintenanceLinks.map((row) => [row.documentId, row.maintenanceId, serviceNames.get(row.maintenanceId) ?? "", row.position]));
   addSheet(workbook, "Mileage", ["Reading ID", "Vehicle", "Date", "Odometer (mi)", "Yearly estimate (mi)", "Notes"], data.mileage.map((r) => [r.id, vehicle(r.vehicleId), date(r.recordedDate), r.mileage, r.annualMileageEstimate, r.notes]));
   addSheet(workbook, "Parts", ["Part ID", "Part number", "Name", "Manufacturer", "Supplier", "Supplier URL", "Unit price", "Quantity", "Volume per unit", "Volume unit", "Minimum quantity", "Storage location", "Notes"], data.parts.map((r) => [r.id, r.partNumber, r.name, r.manufacturer, r.supplierName, r.supplierUrl, money(r.purchasePriceCents), r.quantity, r.volumePerUnit, r.volumeUnit, r.minimumQuantity, r.storageLocation, r.notes]));
   addSheet(workbook, "Vehicle fitments", ["Vehicle", "Part ID", "Part", "Fitment notes"], data.fitments.map((r) => [vehicle(r.vehicleId), r.partId, partNames.get(r.partId) ?? "", r.fitmentNotes]));
@@ -210,7 +222,10 @@ export async function createReadableArchive(data: ExportData, uploads: string, s
     }
     for (const record of data.maintenance) {
       const fields = Object.entries(record).map(([key, value]) => `${fieldName(key)}: ${key.endsWith("Cents") ? money(value as number | null) : value ?? "Not recorded"}`);
-      const files = layout.files.filter((f) => documentBelongsToMaintenance(data, Number(f.id.replace("document-", "")), record.id, f.maintenanceId)).map((f) => `${f.status}: ${f.path}`);
+      const files = reportEvidence(data, record.id).map((file) => {
+        const entry = layout.files.find((item) => item.id === `document-${file.id}`);
+        return `${entry?.status ?? "Pending"}: ${entry?.path ?? file.name}`;
+      });
       const history = data.audit.filter((r) => r.maintenanceId === record.id).map((log) => `${log.changedAt} UTC / ${log.operation}\n${log.summary ?? ""}\n${auditChanges(log).map((change) => `${change.field}: ${change.before || "(empty)"} -> ${change.after || "(empty)"}`).join("\n")}`);
       await add(`${layout.serviceFolders.get(record.id)}/Service record.txt`, `SumpLog service record\nVehicle ID: ${record.vehicleId}\nStatus: ${record.voidedAt ? "VOIDED" : "Active"}\nAmounts in recorded currency; distances in miles.\n\n${fields.join("\n")}\n\nATTACHMENTS\n${files.join("\n") || "No attachments"}\n\nCHANGE HISTORY\n${history.join("\n\n") || "No changes recorded"}\n`);
     }
@@ -321,7 +336,7 @@ async function createMaintenancePdf(data: ExportData, recordIds: number[], uploa
     reportPage(document);
     const vehicle = data.vehicles.find((item) => item.id === record.vehicleId);
     const recordParts = data.maintenanceParts.filter((item) => item.maintenanceId === record.id);
-    const evidence = data.documents.filter((item) => documentBelongsToMaintenance(data, item.id, record.id, item.maintenanceId));
+    const evidence = reportEvidence(data, record.id);
     document.fillColor(reportTheme.accent).font("Helvetica-Bold").fontSize(8).text("MAINTENANCE RECORD");
     document.moveDown(0.3).fillColor(reportTheme.ink).font("Helvetica-Bold").fontSize(19).text(record.title);
     document.moveDown(0.25).fillColor(reportTheme.muted).font("Helvetica").fontSize(10).text(`${vehicle ? nameOfVehicle(vehicle) : "Unknown vehicle"} · ${record.serviceDate}`);
@@ -341,7 +356,7 @@ async function createMaintenancePdf(data: ExportData, recordIds: number[], uploa
     const history = data.audit.filter((item) => item.maintenanceId === record.id);
     if (history.length) { reportSection(document, "Change history"); for (const entry of history) document.fillColor(reportTheme.inkSoft).text(`${entry.changedAt} · ${entry.operation}${entry.summary ? ` · ${entry.summary}` : ""}`); }
     reportSection(document, `Evidence & attachments (${evidence.length})`);
-    for (const file of evidence.sort((a, b) => Number(b.kind === "Receipt" && a.mimeType === "application/pdf") - Number(a.kind === "Receipt" && b.mimeType === "application/pdf"))) {
+    for (const file of evidence) {
       document.fillColor(reportTheme.inkSoft).text(`${file.kind}: ${file.name}${file.sizeBytes != null ? ` (${Math.ceil(file.sizeBytes / 1024)} KB)` : ""}`);
       try { await safeExportFile(uploadRoot, file.storagePath); if (file.kind === "Receipt" && file.mimeType === "application/pdf") pdfReceipts.push({ record, file }); if (/^image\/(jpeg|png|webp)$/i.test(file.mimeType ?? "")) evidenceImages.push({ record, file }); } catch { document.fillColor(reportTheme.danger).text("  File unavailable when report was generated.").fillColor(reportTheme.ink); }
     }

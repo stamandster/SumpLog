@@ -5,6 +5,9 @@ import { PhotoEditor } from "./PhotoEditor";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { DocumentRecord, MaintenanceAttachment, MaintenanceInput, MaintenanceRecord, Vehicle, Part } from "../api";
 import { SelectOrCustom } from "./SelectOrCustom";
+import { availableEvidenceIds } from "../maintenanceEvidenceSelection";
+import { maintenanceSystems } from "../maintenanceOptions";
+import { describeConsumableUsage } from "../consumableUsage";
 
 type FormState = {
   title: string;
@@ -26,7 +29,6 @@ type SelectedPartUsage = {
   amountUsed: string;
 };
 
-const categories = ["Engine", "Suspension", "Brakes", "Electrical", "Fluids", "Body", "Other"];
 
 
 
@@ -46,6 +48,14 @@ function initialForm(vehicle: Vehicle, record: MaintenanceRecord | null, prefill
   };
 }
 
+function evidenceIdsForRecord(documents: DocumentRecord[], record: MaintenanceRecord | null) {
+  if (!record) return [];
+  return documents
+    .filter((document) => document.maintenanceIds?.includes(record.id) ?? document.maintenanceId === record.id)
+    .sort((left, right) => (left.maintenanceRecords?.find((link) => link.id === record.id)?.position ?? Number.MAX_SAFE_INTEGER) - (right.maintenanceRecords?.find((link) => link.id === record.id)?.position ?? Number.MAX_SAFE_INTEGER) || left.id - right.id)
+    .map((document) => document.id);
+}
+
 export function MaintenanceDialog({
   open,
   record,
@@ -55,6 +65,7 @@ export function MaintenanceDialog({
   onDeleteDocument,
   prefill,
   shopNames,
+  systemNames = [],
   onClose,
   onSubmit,
 }: {
@@ -66,6 +77,7 @@ export function MaintenanceDialog({
   onDeleteDocument: (document: DocumentRecord) => Promise<void>;
   prefill?: Partial<MaintenanceInput> | null;
   shopNames: string[];
+  systemNames?: string[];
   onClose: () => void;
   onSubmit: (input: MaintenanceInput, attachments: MaintenanceAttachment[], documentIds: number[]) => Promise<void>;
 }) {
@@ -80,7 +92,7 @@ export function MaintenanceDialog({
   const [partQuery, setPartQuery] = useState("");
   const [deletingAttachmentId, setDeletingAttachmentId] = useState<number | null>(null);
   const [documentQuery, setDocumentQuery] = useState("");
-  const [selectedDocumentIds, setSelectedDocumentIds] = useState<number[]>([]);
+  const [selectedDocumentIds, setSelectedDocumentIds] = useState<number[]>(() => evidenceIdsForRecord(documents, record));
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -100,7 +112,7 @@ export function MaintenanceDialog({
       setPartQuery("");
       setDeletingAttachmentId(null);
       setDocumentQuery("");
-      setSelectedDocumentIds(record ? documents.filter((document) => document.maintenanceIds?.includes(record.id) ?? document.maintenanceId === record.id).map((document) => document.id) : []);
+      setSelectedDocumentIds(evidenceIdsForRecord(documents, record));
       dialog.showModal();
       requestAnimationFrame(() => dialog.querySelector<HTMLElement>("[autofocus], input:not([type=hidden]), select, textarea")?.focus());
     } else if (!open && dialog.open) {
@@ -121,6 +133,7 @@ export function MaintenanceDialog({
     return parts.filter((part) => !selectedParts[part.id] && (!query || [part.name, part.partNumber, part.manufacturer].filter(Boolean).join(" ").toLowerCase().includes(query))).slice(0, 8);
   }, [parts, partQuery, selectedParts]);
   const eligibleDocuments = useMemo(() => documents.filter((document) => document.vehicleId === vehicle.id && !document.insurancePolicyId), [documents, vehicle.id]);
+  const availableSelectedIds = availableEvidenceIds(selectedDocumentIds, eligibleDocuments, vehicle.id);
   const matchingDocuments = useMemo(() => { const query = documentQuery.trim().toLowerCase(); return eligibleDocuments.filter((document) => !selectedDocumentIds.includes(document.id) && (!query || [document.name, document.originalName, document.trackingId, document.kind, document.notes].filter(Boolean).join(" ").toLowerCase().includes(query))).slice(0, 8); }, [eligibleDocuments, selectedDocumentIds, documentQuery]);
 
   const errors = useMemo(() => {
@@ -133,7 +146,7 @@ export function MaintenanceDialog({
     for (const [id, usage] of Object.entries(selectedParts)) {
       const part = parts.find((item) => item.id === Number(id));
       if (!part) continue;
-      if (usage.usageMode === "Partial" && (!Number.isFinite(Number(usage.amountUsed)) || Number(usage.amountUsed) <= 0 || !part.volumePerUnit || Number(usage.amountUsed) > part.volumePerUnit)) next.parts = `Enter an amount up to ${part.volumePerUnit ?? 0} ${part.volumeUnit ?? "units"} for ${part.name}.`;
+      if (usage.usageMode === "Partial" && (!Number.isFinite(Number(usage.amountUsed)) || Number(usage.amountUsed) <= 0 || Number(usage.amountUsed) > 1_000_000 || !part.volumePerUnit || Number(usage.amountUsed) / part.volumePerUnit > 1000)) next.parts = `Enter a positive total volume for ${part.name} (up to 1,000 items).`;
       if (usage.usageMode === "Whole" && (!Number.isInteger(Number(usage.quantity)) || Number(usage.quantity) < 1)) next.parts = `Enter a whole-unit quantity for ${part.name}.`;
     }
     return next;
@@ -145,7 +158,7 @@ export function MaintenanceDialog({
   };
 
   const close = () => {
-    if (status === "loading") return;
+    if (status === "loading" || deletingAttachmentId != null) return;
     onClose();
   };
 
@@ -158,17 +171,21 @@ export function MaintenanceDialog({
   const updateAttachment = (index: number, changes: Partial<Pick<MaintenanceAttachment, "kind" | "name" | "rotation">>) => setAttachments((current) => current.map((attachment, attachmentIndex) => attachmentIndex === index ? { ...attachment, ...changes } : attachment));
   const removeAttachment = (index: number) => setAttachments((current) => current.filter((_, attachmentIndex) => attachmentIndex !== index));
   const deleteSavedAttachment = async (file: DocumentRecord) => {
+    if (status === "loading" || status === "success" || deletingAttachmentId != null) return;
     if (!window.confirm(`Delete ${file.name}? This permanently removes the attached file.`)) return;
     setDeletingAttachmentId(file.id);
     setSubmitError("");
-    try { await onDeleteDocument(file); }
+    try {
+      await onDeleteDocument(file);
+      setSelectedDocumentIds((current) => current.filter((id) => id !== file.id));
+    }
     catch (error) { setSubmitError(error instanceof Error ? error.message : "The attachment could not be deleted."); }
     finally { setDeletingAttachmentId(null); }
   };
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (status === "loading" || status === "success") return;
+    if (status === "loading" || status === "success" || deletingAttachmentId != null) return;
     setTouched({ title: true, serviceDate: true, mileage: true, cost: true, laborHours: true, parts: true });
     if (Object.keys(errors).length) return;
     setStatus("loading");
@@ -202,7 +219,7 @@ export function MaintenanceDialog({
             amountUnit: usage.usageMode === "Partial" ? part?.volumeUnit : null,
           };
         }),
-      }, attachments, selectedDocumentIds);
+      }, attachments, availableSelectedIds);
       setStatus("success");
       window.setTimeout(onClose, 650);
     } catch (error) {
@@ -229,7 +246,7 @@ export function MaintenanceDialog({
             <input id="title" name="title" autoFocus value={form.title} onChange={(e) => update("title", e.target.value)} onBlur={() => setTouched((t) => ({ ...t, title: true }))} placeholder="Oil and filter change" aria-invalid={Boolean(fieldError("title"))} aria-describedby="title-help" />
           </Field>
           <Field label="System" name="category">
-            <SelectOrCustom label="System" value={form.category} options={categories} onChange={(value) => update("category", value)} />
+            <SelectOrCustom label="System" value={form.category} options={[...maintenanceSystems, ...systemNames]} onChange={(value) => update("category", value)} />
           </Field>
           <Field label="Completed on" name="serviceDate" error={fieldError("serviceDate")}>
             <input id="serviceDate" type="date" value={form.serviceDate} onChange={(e) => update("serviceDate", e.target.value)} onBlur={() => setTouched((t) => ({ ...t, serviceDate: true }))} aria-invalid={Boolean(fieldError("serviceDate"))} />
@@ -249,10 +266,10 @@ export function MaintenanceDialog({
               const unitCost = record?.parts?.find((entry) => entry.partId === part.id)?.unitCostCents ?? part.purchasePriceCents;
               const lineQuantity = usage.usageMode === "Partial" && part.volumePerUnit ? Number(usage.amountUsed || 0) / part.volumePerUnit : Number(usage.quantity || 0);
               return <div className="maintenance-part-selected" key={part.id}>
-                <div className="maintenance-part-selected__identity"><strong>{part.name}</strong><small>{part.partNumber} · {preferences().currency}{(unitCost / 100).toFixed(2)} per unit{supportsPartial ? ` · ${part.volumePerUnit} ${part.volumeUnit} each` : ""}</small></div>
-                {supportsPartial && <label className="maintenance-part-usage-mode"><span>Use</span><select value={usage.usageMode} onChange={(event) => setSelectedParts((current) => ({ ...current, [part.id]: { ...current[part.id], usageMode: event.target.value as "Whole" | "Partial" } }))}><option value="Whole">Whole item</option><option value="Partial">Partial amount</option></select></label>}
+                <div className="maintenance-part-selected__identity"><strong>{part.name}</strong><small>{part.partNumber} · {preferences().currency}{(unitCost / 100).toFixed(2)} per unit{supportsPartial ? ` · ${part.volumePerUnit} ${part.volumeUnit} each` : ""}</small>{usage.usageMode === "Partial" && supportsPartial && <small aria-live="polite">{describeConsumableUsage(Number(usage.amountUsed), part.volumePerUnit!, part.volumeUnit!)}</small>}</div>
+                {supportsPartial && <label className="maintenance-part-usage-mode"><span>Use</span><select value={usage.usageMode} onChange={(event) => setSelectedParts((current) => ({ ...current, [part.id]: { ...current[part.id], usageMode: event.target.value as "Whole" | "Partial" } }))}><option value="Whole">Whole item</option><option value="Partial">Amount by volume</option></select></label>}
                 {usage.usageMode === "Partial" && supportsPartial
-                  ? <label className="maintenance-part-amount"><span>Amount used</span><div className="input-unit"><input type="number" min="0" max={part.volumePerUnit ?? undefined} step="any" inputMode="decimal" value={usage.amountUsed} onChange={(event) => setSelectedParts((current) => ({ ...current, [part.id]: { ...current[part.id], amountUsed: event.target.value } }))} aria-label={`Amount of ${part.name} used`} /><span>{part.volumeUnit}</span></div></label>
+                  ? <label className="maintenance-part-amount"><span>Amount used</span><div className="input-unit"><input type="number" min="0" max={Math.min(1_000_000, (part.volumePerUnit ?? 1) * 1000)} step="any" inputMode="decimal" value={usage.amountUsed} onChange={(event) => setSelectedParts((current) => ({ ...current, [part.id]: { ...current[part.id], amountUsed: event.target.value } }))} aria-label={`Amount of ${part.name} used`} /><span>{part.volumeUnit}</span></div></label>
                   : <label className="maintenance-part-amount"><span>Quantity</span><input className="part-quantity" type="number" min="1" max="1000" step="1" value={usage.quantity} onChange={(event) => setSelectedParts((current) => ({ ...current, [part.id]: { ...current[part.id], quantity: event.target.value } }))} aria-label={`Quantity of ${part.name}`} /></label>}
                 <span className="maintenance-part-line-cost">{preferences().currency}{(Math.round(lineQuantity * unitCost) / 100).toFixed(2)}</span>
                 <button type="button" className="icon-button maintenance-part-remove" aria-label={`Remove ${part.name} from parts used`} title="Remove part" onClick={() => setSelectedParts((current) => { const next = { ...current }; delete next[part.id]; return next; })}><X size={16} /></button>
@@ -293,8 +310,8 @@ export function MaintenanceDialog({
           </Field>
           {open && record && <section className="field maintenance-saved-evidence" data-span="wide" aria-label="Saved evidence and attachments">
             <strong>Saved evidence & attachments</strong>
-            <p className="field-note">Open a photo to rotate it, save or cancel, or view the original. Photo saves apply immediately, independently of this form.</p>
-            <MaintenanceEvidence files={documents.filter((document) => document.maintenanceIds?.includes(record.id) ?? document.maintenanceId === record.id)} onDelete={(file) => void deleteSavedAttachment(file)} deletingId={deletingAttachmentId} />
+            <p className="field-note">Drag the grip to set the order used in this service record. The arrow controls provide a keyboard and touch alternative. The saved order applies only to this record, even for shared files.</p>
+            <MaintenanceEvidence files={selectedDocumentIds.map((id) => eligibleDocuments.find((document) => document.id === id)).filter((document): document is DocumentRecord => Boolean(document))} onDelete={(file) => void deleteSavedAttachment(file)} deletingId={deletingAttachmentId} reorderable onReorder={setSelectedDocumentIds} />
             <a className="button button--quiet button--small" href={`/api/export/maintenance.pdf?ids=${record.id}`} download><Download size={15} />Export saved record PDF</a>
           </section>}
           <Field label="Receipts, photos, or documents" name="maintenanceFiles" span="wide">
@@ -308,8 +325,8 @@ export function MaintenanceDialog({
           {submitError || (status === "success" ? "Maintenance saved." : "")}
         </div>
         <footer className="dialog__footer">
-          <button type="button" className="button button--quiet" onClick={close} disabled={status === "loading"}>Cancel</button>
-          <button type="submit" className="button button--primary" disabled={status === "loading" || status === "success"} data-state={status}>
+          <button type="button" className="button button--quiet" onClick={close} disabled={status === "loading" || deletingAttachmentId != null}>Cancel</button>
+          <button type="submit" className="button button--primary" disabled={status === "loading" || status === "success" || deletingAttachmentId != null} data-state={status}>
             {status === "loading" ? <><LoaderCircle className="spin" size={17} />Saving…</> : status === "success" ? <><Check size={17} />Saved</> : record ? "Save changes" : "Save record"}
           </button>
         </footer>

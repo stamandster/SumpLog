@@ -18,7 +18,10 @@ describe("top navigation vehicle context", () => {
   test("offers a labeled switcher with the current car selected", () => {
     const html = renderToStaticMarkup(<VehicleContext vehicles={vehicles} vehicleId={2} onSelectVehicle={() => {}} />);
     expect(html).toContain("<label");
-    expect(html).toContain('<option value="2" selected="">2005 Toyota Tacoma · #2</option>');
+    expect(html).toContain('role="combobox"');
+    expect(html).toContain('aria-autocomplete="list"');
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain('value="2005 Toyota Tacoma · #2"');
     expect(html).toContain("Documents, fleet and settings are garage-wide");
   });
   test("shows context on module pages but leaves the dashboard heading alone", () => {
@@ -28,7 +31,8 @@ describe("top navigation vehicle context", () => {
   test("does not guess a selected vehicle for empty or stale selections", () => {
     expect(renderToStaticMarkup(<VehicleContext vehicles={[]} vehicleId={null} onSelectVehicle={() => {}} />)).toContain("No vehicle selected");
     const html = renderToStaticMarkup(<VehicleContext vehicles={vehicles} vehicleId={99} onSelectVehicle={() => {}} />);
-    expect(html).toContain('<option value="" disabled="" selected="">Choose a vehicle</option>');
+    expect(html).toContain('placeholder="Choose a vehicle"');
+    expect(html).toContain('value=""');
   });
   test("preserves search and maintenance actions alongside the selected car", () => {
     const html = renderToStaticMarkup(<Topbar {...props} showVehicleContext searchVisible />);

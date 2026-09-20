@@ -14,7 +14,7 @@ The current application is single-owner software. Multi-user and licensed busine
 - Project planning with workflow status, budgets, target dates, and checklist items
 - A searchable document gallery with lazy previews, editable display names, stable tracking IDs, photo rotation, and links to multiple maintenance records
 - Independent insurance policies that can cover zero, one, or several vehicles and retain their own documents
-- Print-friendly maintenance PDF reports, a human-readable ZIP/Excel export, CSV summaries, and restorable JSON backups
+- Print-friendly maintenance PDF reports, a human-readable ZIP/Excel export, CSV summaries, and restorable ZIP backups (with legacy JSON import)
 - Local calculators for fluid usage by weight, torque, volume, pressure, flooded-battery hydrometer readings, and coolant protection
 
 ## Quick start
@@ -37,6 +37,14 @@ bun run start
 
 Open `http://localhost:3000`.
 
+On Windows, `bootstrap.ps1` can build and start the production app in the background with LAN checks:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\bootstrap.ps1 -OpenBrowser
+```
+
+It prints the process ID needed to stop it later: `Stop-Process -Id <PID>`. If that window is gone, see the [Self-hosting guide](docs/SELF_HOSTING.md#windows-bootstrap-script) for the safe port-3000 lookup command.
+
 ## Network access
 
 Without a password, SumpLog deliberately binds to loopback and rejects API access through a LAN address. Set an owner password of at least 12 characters before exposing it to another device:
@@ -56,6 +64,7 @@ Then open `http://<server-ip>:3000` from another machine. Windows Firewall and t
 - [Architecture and data model](docs/ARCHITECTURE.md) — runtime structure, storage, relationships, and deletion rules
 - [API reference](docs/API.md) — routes, authentication, uploads, response behavior, and export endpoints
 - [Development guide](docs/DEVELOPMENT.md) — repository layout, scripts, migrations, tests, and contribution checks
+- [Enhancement proposal](docs/ENHANCEMENTS.md) — optional AI maintenance chat and in-app provider configuration
 - [Visual concepts](design-concepts/README.md) — the explorations that led to the current clean parts-counter direction
 
 ## Data location
@@ -66,7 +75,7 @@ Defaults:
 - Uploads: `data/uploads/`
 - Automatic pre-restore recovery files: `data/backups/`
 
-Set `DATABASE_URL`, `UPLOAD_DIRECTORY`, `PORT`, and `HOST` to override runtime paths and listening behavior. Back up the database and uploads together, or use the in-app JSON backup, which embeds stored assets.
+Set `DATABASE_URL`, `UPLOAD_DIRECTORY`, `PORT`, and `HOST` to override runtime paths and listening behavior. Back up the database and uploads together, or use the in-app Full ZIP backup, which packages JSON records with original files.
 
 ## Verification
 

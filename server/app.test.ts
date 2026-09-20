@@ -3,6 +3,7 @@ import { rmSync, mkdirSync, mkdtempSync, readdirSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
+import { availableEvidenceIds } from "../src/maintenanceEvidenceSelection";
 
 // Each Bun invocation owns its fixture directory. This avoids SQLite WAL locks and
 // uploaded fixtures leaking between a running dev server and parallel test runs.
@@ -36,6 +37,144 @@ afterAll(async () => {
 });
 
 describe("SumpLog API", () => {
+  it("uses total volume across full and partial bottles alongside a whole item", async () => {
+    const vehicle = await (await app.request("/api/vehicles", jsonRequest("POST", { year: 2021, make: "Stock", model: "Multiple bottles", mileage: 100, mileageDate: "2026-09-13" }))).json();
+    const input = { itemType: "Consumable", partNumber: "VOLUME-1QT", name: "1 qt ATF", purchasePrice: 7.97, quantity: 2, volumePerUnit: 1, volumeUnit: "qt", minimumQuantity: 0 };
+    const bottle = await (await app.request("/api/parts", jsonRequest("POST", input))).json();
+    const jug = await (await app.request("/api/parts", jsonRequest("POST", { ...input, partNumber: "VOLUME-4QT", name: "4 qt ATF", purchasePrice: 29.88, quantity: 1, volumePerUnit: 4 }))).json();
+    const payload = { title: "ATF service", category: "Fluids", serviceDate: "2026-09-13", mileage: 100, cost: 0, parts: [{ partId: jug.id, quantity: 1, usageMode: "Whole" }, { partId: bottle.id, quantity: 1.5, usageMode: "Partial", amountUsed: 1.5, amountUnit: "qt" }] };
+    const response = await app.request(`/api/vehicles/${vehicle.id}/maintenance`, jsonRequest("POST", payload));
+    expect(response.status).toBe(201);
+    const record = await response.json();
+    expect(record.costCents).toBe(4184);
+    const stock = async (id: number) => (await (await app.request("/api/parts")).json()).find((row: { id: number }) => row.id === id).quantity;
+    expect(await stock(jug.id)).toBe(0);
+    expect(await stock(bottle.id)).toBe(0.5);
+    const saved = (await (await app.request(`/api/vehicles/${vehicle.id}/maintenance`)).json())[0];
+    expect(saved.parts.find((part: { partId: number }) => part.partId === bottle.id)).toMatchObject({ quantity: 1.5, amountUsed: 1.5, amountUnit: "qt", usageMode: "Partial" });
+    const bundle = new FormData(); bundle.set("record", JSON.stringify(payload));
+    bundle.set("files", new File(["ATF service evidence"], "receipt.txt", { type: "text/plain" }));
+    expect((await app.request(`/api/maintenance/${record.id}/bundle`, { method: "PUT", body: bundle })).status).toBe(200);
+    expect(await stock(bottle.id)).toBe(0.5);
+    const update = async (amountUsed: number) => app.request(`/api/maintenance/${record.id}`, jsonRequest("PUT", { ...payload, parts: [payload.parts[0], { ...payload.parts[1], quantity: amountUsed, amountUsed }] }));
+    expect((await update(2.5)).status).toBe(409);
+    expect(await stock(bottle.id)).toBe(0.5);
+    expect((await update(1)).status).toBe(200);
+    expect(await stock(bottle.id)).toBe(1);
+    expect((await update(2)).status).toBe(200);
+    expect(await stock(bottle.id)).toBe(0);
+    await app.request(`/api/vehicles/${vehicle.id}`, { method: "DELETE" });
+    await app.request(`/api/parts/${bottle.id}`, { method: "DELETE" });
+    await app.request(`/api/parts/${jug.id}`, { method: "DELETE" });
+  });
+
+  it("deducts whole stock once, applies usage edits by delta, and reverses void/restore once", async () => {
+    const vehicle = await (await app.request("/api/vehicles", jsonRequest("POST", { year: 2021, make: "Stock", model: "Test", mileage: 100, mileageDate: "2026-09-13" }))).json();
+    const input = { itemType: "Consumable", partNumber: "STOCK-WHOLE", name: "ATF stock fixture", purchasePrice: 10, quantity: 2, volumePerUnit: 1, volumeUnit: "qt", minimumQuantity: 0 };
+    const part = await (await app.request("/api/parts", jsonRequest("POST", input))).json();
+    const stock = async () => (await (await app.request("/api/parts")).json()).find((row: { id: number }) => row.id === part.id).quantity;
+    const payload = { title: "Transfer case", category: "Fluids", serviceDate: "2026-09-13", mileage: 100, cost: 0, submissionKey: "stock-retry", parts: [{ partId: part.id, quantity: 2, usageMode: "Whole" }] };
+    const response = await app.request(`/api/vehicles/${vehicle.id}/maintenance`, jsonRequest("POST", payload));
+    expect(response.status).toBe(201);
+    const record = await response.json();
+    expect(await stock()).toBe(0);
+    const retry = await (await app.request(`/api/vehicles/${vehicle.id}/maintenance`, jsonRequest("POST", payload))).json();
+    expect(retry.id).toBe(record.id);
+    expect(await stock()).toBe(0);
+    const edit = async (quantity: number) => app.request(`/api/maintenance/${record.id}`, jsonRequest("PUT", { ...payload, notes: "Usage edit", parts: quantity ? [{ partId: part.id, quantity, usageMode: "Whole" }] : [] }));
+    expect((await edit(2)).status).toBe(200);
+    expect(await stock()).toBe(0);
+    expect((await edit(1)).status).toBe(200);
+    expect(await stock()).toBe(1);
+    expect((await edit(0)).status).toBe(200);
+    expect(await stock()).toBe(2);
+    expect((await edit(2)).status).toBe(200);
+    const status = async (voided: boolean) => app.request(`/api/maintenance/${record.id}/status`, jsonRequest("PATCH", { voided }));
+    expect((await status(true)).status).toBe(200);
+    expect(await stock()).toBe(2);
+    expect((await status(true)).status).toBe(200);
+    expect(await stock()).toBe(2);
+    expect((await status(false)).status).toBe(200);
+    expect((await status(false)).status).toBe(200);
+    expect(await stock()).toBe(0);
+    expect((await edit(3)).status).toBe(409);
+    expect(await stock()).toBe(0);
+    const saved = (await (await app.request(`/api/vehicles/${vehicle.id}/maintenance`)).json())[0];
+    expect(saved.parts[0].quantity).toBe(2);
+    await status(true);
+    await app.request(`/api/parts/${part.id}`, jsonRequest("PUT", { ...input, quantity: 0 }));
+    expect((await status(false)).status).toBe(409);
+    expect((await (await app.request(`/api/vehicles/${vehicle.id}/maintenance`)).json())[0].voidedAt).not.toBeNull();
+    expect(await stock()).toBe(0);
+    await app.request(`/api/vehicles/${vehicle.id}`, { method: "DELETE" });
+    await app.request(`/api/parts/${part.id}`, { method: "DELETE" });
+  });
+
+  it("deducts fractional containers in bundled maintenance and rolls back an insufficient multi-part save", async () => {
+    const vehicle = await (await app.request("/api/vehicles", jsonRequest("POST", { year: 2021, make: "Stock", model: "Partial", mileage: 100, mileageDate: "2026-09-13" }))).json();
+    const input = { itemType: "Consumable", partNumber: "STOCK-PARTIAL", name: "Fluid stock fixture", purchasePrice: 16, quantity: 2, volumePerUnit: 32, volumeUnit: "fl oz", minimumQuantity: 0 };
+    const part = await (await app.request("/api/parts", jsonRequest("POST", input))).json();
+    const empty = await (await app.request("/api/parts", jsonRequest("POST", { ...input, partNumber: "STOCK-EMPTY", quantity: 0 }))).json();
+    const stock = async () => (await (await app.request("/api/parts")).json()).find((row: { id: number }) => row.id === part.id).quantity;
+    const payload = { title: "Top up", category: "Fluids", serviceDate: "2026-09-13", mileage: 100, cost: 0, parts: [{ partId: part.id, quantity: 0.125, usageMode: "Partial", amountUsed: 4, amountUnit: "fl oz" }] };
+    const bundle = new FormData(); bundle.set("record", JSON.stringify(payload));
+    bundle.set("files", new File(["Test stock receipt"], "receipt.txt", { type: "text/plain" }));
+    const response = await app.request(`/api/vehicles/${vehicle.id}/maintenance-bundle`, { method: "POST", body: bundle });
+    expect(response.status).toBe(201);
+    const record = await response.json();
+    expect(await stock()).toBe(1.875);
+    expect(record.costCents).toBe(200);
+    expect((await app.request(`/api/maintenance/${record.id}`, jsonRequest("PUT", payload))).status).toBe(200);
+    expect(await stock()).toBe(1.875);
+    expect((await app.request(`/api/maintenance/${record.id}`, jsonRequest("PUT", { ...payload, parts: [{ ...payload.parts[0], amountUsed: 8 }] }))).status).toBe(200);
+    expect(await stock()).toBe(1.75);
+    const failed = await app.request(`/api/vehicles/${vehicle.id}/maintenance`, jsonRequest("POST", { ...payload, mileage: 200, parts: [{ partId: part.id, quantity: 1 }, { partId: empty.id, quantity: 1 }] }));
+    expect(failed.status).toBe(409);
+    expect(await stock()).toBe(1.75);
+    expect((await (await app.request(`/api/vehicles/${vehicle.id}/maintenance`)).json()).length).toBe(1);
+    expect((await (await app.request("/api/vehicles")).json()).find((row: { id: number }) => row.id === vehicle.id).mileage).toBe(100);
+    expect((await app.request(`/api/parts/${part.id}`, jsonRequest("PUT", { ...input, quantity: 1.75 }))).status).toBe(200);
+    expect((await app.request(`/api/parts/${part.id}`, jsonRequest("PUT", { ...input, itemType: "Part", quantity: 1.75 }))).status).toBe(422);
+    await app.request(`/api/vehicles/${vehicle.id}`, { method: "DELETE" });
+    expect(await stock()).toBe(1.75);
+    await app.request(`/api/parts/${part.id}`, { method: "DELETE" });
+    await app.request(`/api/parts/${empty.id}`, { method: "DELETE" });
+  });
+
+  it("saves a cloned consumable as independent inventory with copied fitments", async () => {
+    const payload = { itemType: "Consumable", category: "Test fluid", specifications: "Spec A", approvals: "Approval B", partNumber: "CLONE-SOURCE", name: "Clone fixture", manufacturer: "Clone test", purchasePrice: 14.99, quantity: 3, volumePerUnit: 32, volumeUnit: "fl oz", minimumQuantity: 1, vehicleId: 1, fitments: [{ vehicleId: 1, notes: "Test fitment" }] };
+    const originalResponse = await app.request("/api/parts", jsonRequest("POST", payload));
+    expect(originalResponse.status).toBe(201);
+    const original = await originalResponse.json();
+    const cloneResponse = await app.request("/api/parts", jsonRequest("POST", { ...payload, partNumber: "CLONE-NEW", quantity: 0 }));
+    expect(cloneResponse.status).toBe(201);
+    const clone = await cloneResponse.json();
+    expect(clone.id).not.toBe(original.id);
+    const inventory = await (await app.request("/api/parts")).json();
+    expect(inventory.find((part: { id: number }) => part.id === original.id).quantity).toBe(3);
+    const saved = inventory.find((part: { id: number }) => part.id === clone.id);
+    expect(saved).toMatchObject({ itemType: "Consumable", specifications: "Spec A", approvals: "Approval B", volumePerUnit: 32, volumeUnit: "fl oz", quantity: 0, partNumber: "CLONE-NEW" });
+    expect(saved.fitments).toContainEqual({ vehicleId: 1, notes: "Test fitment" });
+    await app.request(`/api/parts/${clone.id}`, { method: "DELETE" });
+    await app.request(`/api/parts/${original.id}`, { method: "DELETE" });
+  });
+
+  it("offers saved shops and systems across vehicles, including custom task systems", async () => {
+    const vehicle = await (await app.request("/api/vehicles", jsonRequest("POST", { year: 2020, make: "Options", model: "Test", mileage: 100, mileageDate: "2026-09-13" }))).json();
+    const record = await app.request(`/api/vehicles/${vehicle.id}/maintenance`, jsonRequest("POST", { title: "Seat repair", category: "Upholstery", shopName: "Garage-wide helper", serviceDate: "2026-09-13", mileage: 100, cost: 0, laborHours: 0, difficulty: 1 }));
+    expect(record.status).toBe(201);
+    const plan = await app.request(`/api/vehicles/${vehicle.id}/service-plans`, jsonRequest("POST", { title: "Clean seat rails", category: "Seat rails", intervalMileage: 10000, intervalMonths: null, nextDueMileage: 10100, nextDueDate: null, items: [], createReminder: false, vehicleIds: [vehicle.id] }));
+    expect(plan.status).toBe(201);
+    const response = await app.request("/api/maintenance/options?vehicleId=1");
+    expect(response.status).toBe(200);
+    const options = await response.json();
+    expect(options.shops).toContain("Garage-wide helper");
+    expect(options.systems).toContain("Upholstery");
+    expect(options.systems).toContain("Seat rails");
+    expect(new Set(options.systems).size).toBe(options.systems.length);
+    await app.request(`/api/vehicles/${vehicle.id}`, { method: "DELETE" });
+  });
+
   it("serves small previews, saves rotation and preserves original photo bytes", async () => {
     const sharp = (await import("sharp")).default;
     const original = await sharp({ create: { width: 1600, height: 800, channels: 3, background: "#dc8614" } }).png().toBuffer();
@@ -155,7 +294,7 @@ describe("SumpLog API", () => {
     const usage = records.find((record: { title: string }) => record.title === payload.title).parts[0];
     expect(usage).toMatchObject({ usageMode: "Partial", amountUsed: 4, amountUnit: "fl oz", quantity: 0.125 });
     expect(records.find((record: { title: string }) => record.title === payload.title).partsCostCents).toBe(200);
-    const invalid = await app.request(`/api/maintenance/${records[0].id}`, jsonRequest("PUT", { ...payload, parts: [{ ...payload.parts[0], amountUsed: 40 }] }));
+    const invalid = await app.request(`/api/maintenance/${records[0].id}`, jsonRequest("PUT", { ...payload, parts: [{ ...payload.parts[0], amountUsed: 0 }] }));
     expect(invalid.status).toBe(422);
     await app.request(`/api/vehicles/${vehicle.id}`, { method: "DELETE" });
     await app.request(`/api/parts/${part.id}`, { method: "DELETE" });
@@ -479,6 +618,39 @@ describe("SumpLog API", () => {
     await app.request(`/api/vehicles/${other.id}`, { method: "DELETE" });
   });
 
+  it("orders shared maintenance evidence independently for each service record", async () => {
+    const vehicle = await (await app.request("/api/vehicles", jsonRequest("POST", { year: 2022, make: "Test", model: "Evidence", mileage: 100, mileageDate: "2026-09-09" }))).json();
+    const first = await (await app.request(`/api/vehicles/${vehicle.id}/maintenance`, jsonRequest("POST", { title: "First service", category: "Engine", serviceDate: "2026-09-09", mileage: 100, cost: 0, laborHours: 0, difficulty: 1 }))).json();
+    const second = await (await app.request(`/api/vehicles/${vehicle.id}/maintenance`, jsonRequest("POST", { title: "Second service", category: "Brakes", serviceDate: "2026-09-09", mileage: 100, cost: 0, laborHours: 0, difficulty: 1 }))).json();
+    const upload = async (name: string) => {
+      const body = new FormData(); body.set("vehicleId", String(vehicle.id)); body.set("maintenanceIds", JSON.stringify([first.id, second.id])); body.set("kind", "Photo"); body.set("file", new File([name], `${name}.txt`, { type: "text/plain" }));
+      const response = await app.request("/api/documents", { method: "POST", body }); expect(response.status).toBe(201); return response.json();
+    };
+    const before = await upload("before"); const after = await upload("after");
+    const reordered = await app.request(`/api/maintenance/${first.id}/evidence-order`, jsonRequest("PUT", { documentIds: [after.id, before.id] }));
+    expect(reordered.status).toBe(200); expect((await reordered.json()).documentIds).toEqual([after.id, before.id]);
+    const rows = await (await app.request("/api/documents")).json();
+    const evidenceOrder = (maintenanceId: number) => rows.filter((document: { maintenanceIds: number[] }) => document.maintenanceIds.includes(maintenanceId)).sort((left: { maintenanceRecords: Array<{ id: number; position: number }> }, right: { maintenanceRecords: Array<{ id: number; position: number }> }) => left.maintenanceRecords.find((link) => link.id === maintenanceId)!.position - right.maintenanceRecords.find((link) => link.id === maintenanceId)!.position).map((document: { id: number }) => document.id);
+    expect(evidenceOrder(first.id)).toEqual([after.id, before.id]);
+    expect(evidenceOrder(second.id)).toEqual([before.id, after.id]);
+    // A deletion after rearranging must not leave an invisible ID in the save payload.
+    const removed = await upload("deleted-after-reordering");
+    const pendingOrder = [after.id, removed.id, before.id];
+    expect((await app.request(`/api/documents/${removed.id}`, { method: "DELETE" })).status).toBe(200);
+    expect((await app.request(`/api/maintenance/${first.id}/evidence-order`, jsonRequest("PUT", { documentIds: pendingOrder }))).status).toBe(422);
+    const currentDocuments = await (await app.request("/api/documents")).json();
+    const validOrder = availableEvidenceIds(pendingOrder, currentDocuments, vehicle.id);
+    expect(validOrder).toEqual([after.id, before.id]);
+    const savedOrder = await app.request(`/api/maintenance/${first.id}/evidence-order`, jsonRequest("PUT", { documentIds: validOrder }));
+    expect(savedOrder.status).toBe(200);
+    expect((await savedOrder.json()).documentIds).toEqual([after.id, before.id]);
+    const refreshedDocuments = await (await app.request("/api/documents")).json();
+    expect(refreshedDocuments.find((document: { id: number }) => document.id === after.id).maintenanceRecords.find((record: { id: number }) => record.id === first.id).position).toBe(0);
+    expect(refreshedDocuments.find((document: { id: number }) => document.id === before.id).maintenanceRecords.find((record: { id: number }) => record.id === first.id).position).toBe(1);
+    expect((await app.request(`/api/maintenance/${first.id}/evidence-order`, jsonRequest("PUT", { documentIds: [999999] }))).status).toBe(422);
+    await app.request(`/api/vehicles/${vehicle.id}`, { method: "DELETE" });
+  });
+
   it("supports multiple fitments without duplicate inventory rows", async () => {
     const other = await (await app.request("/api/vehicles", jsonRequest("POST", { year: 2020, make: "Test", model: "Fitment", mileage: 100, mileageDate: "2026-09-01" }))).json();
     const input = { partNumber: "MULTI-TEST", name: "Shared filter", purchasePrice: 5, quantity: 2, minimumQuantity: 1, vehicleId: null, fitments: [{ vehicleId: 1, notes: "Engine" }, { vehicleId: other.id, notes: "Alternate" }] };
@@ -544,7 +716,145 @@ describe("SumpLog API", () => {
     expect(await (await app.request(`/api/documents/${document.id}/file`)).text()).toBe("receipt contents");
     const unsafe = structuredClone(snapshot); unsafe.documents[0].storagePath = "C:/Windows/win.ini";
     expect((await app.request("/api/import/preview", { method: "POST", body: form(unsafe) })).status).toBe(422);
+    const exportedAgain = await (await app.request("/api/export/json")).json();
+    // Legacy vehicle insurance is intentionally moved into independent policy rows.
+    expect(exportedAgain.insurancePolicies).toEqual(expect.arrayContaining(snapshot.insurancePolicies));
+    expect(exportedAgain.insurancePolicies).toEqual(expect.arrayContaining([expect.objectContaining({ provider: "Test Mutual", policyNumber: "POL-123", premiumCents: 62550 })]));
+    // Once legacy records are materialized, compare every table on another round trip.
+    expect((await app.request("/api/import/json", { method: "POST", body: form(exportedAgain) })).status).toBe(200);
+    const stable = await (await app.request("/api/export/json")).json();
+    for (const [key, rows] of Object.entries(exportedAgain)) if (Array.isArray(rows)) expect(stable[key]).toEqual(rows);
+    expect(exportedAgain.assets).toEqual(snapshot.assets);
+    expect(exportedAgain).not.toHaveProperty("ownerCredentials");
+    const damaged = structuredClone(snapshot);
+    const assetKey = Object.keys(damaged.assets)[0];
+    damaged.assets[assetKey].sha256 = "0".repeat(64);
+    expect((await app.request("/api/import/json", { method: "POST", body: form(damaged) })).status).toBe(422);
+    const missing = structuredClone(snapshot); delete missing.assets[assetKey];
+    expect((await (await app.request("/api/import/preview", { method: "POST", body: form(missing) })).json()).warnings.length).toBeGreaterThan(0);
+    expect((await app.request("/api/import/json", { method: "POST", body: form(missing) })).status).toBe(422);
+    expect((await (await app.request("/api/export/json")).json()).assets).toEqual(snapshot.assets);
   });
+
+  it("round-trips vehicle framing and shared receipt/photo originals with independent attachment order", async () => {
+    const { createSnapshot } = await import("./backup");
+    const schema = await import("./db/schema");
+    const baseline = await createSnapshot();
+    // A newly added garage table must be included in backups, not silently omitted.
+    for (const key of Object.keys(schema)) if (key !== "ownerCredentials") expect(baseline).toHaveProperty(key);
+    const snapshot = structuredClone(baseline);
+    for (const key of Object.keys(schema)) if (key !== "ownerCredentials") (snapshot as Record<string, unknown>)[key] = [];
+    const vehicle = { ...baseline.vehicles[0], id: baseline.vehicles[0].id, photoRotation: 90, photoZoom: 1.5, photoPositionX: 30, photoPositionY: 70, imageUrl: `asset:vehicles-${baseline.vehicles[0].id}` };
+    snapshot.vehicles = [vehicle];
+    snapshot.maintenanceRecords = [301, 302].map((id) => ({ ...baseline.maintenanceRecords[0], id, vehicleId: vehicle.id }));
+    const png = await (await import("sharp")).default({ create: { width: 1200, height: 800, channels: 3, background: "orange" } }).png().toBuffer();
+    const pdf = await (await import("pdf-lib")).PDFDocument.create(); pdf.addPage();
+    const pdfBytes = Buffer.from(await pdf.save());
+    const asset = (bytes: Buffer, mimeType: string) => ({ data: bytes.toString("base64"), mimeType, sha256: new Bun.CryptoHasher("sha256").update(bytes).digest("hex") });
+    snapshot.assets = { [`vehicles-${vehicle.id}`]: asset(png, "image/png"), "documents-91": asset(png, "image/png"), "documents-92": asset(pdfBytes, "application/pdf") };
+    snapshot.documents = [91, 92].map((id) => ({ ...baseline.documents[0], id, vehicleId: vehicle.id, maintenanceId: 301, projectId: null, insurancePolicyId: null, trackingId: crypto.randomUUID(), originalName: id === 91 ? "original.png" : "original.pdf", name: id === 91 ? "Shared service photo" : "Shared receipt", photoRotation: id === 91 ? 270 : 0, storagePath: `asset:documents-${id}`, mimeType: id === 91 ? "image/png" : "application/pdf", sizeBytes: id === 91 ? png.length : pdfBytes.length }));
+    snapshot.documentMaintenanceLinks = [{ documentId: 91, maintenanceId: 301, position: 1 }, { documentId: 92, maintenanceId: 301, position: 0 }, { documentId: 91, maintenanceId: 302, position: 0 }, { documentId: 92, maintenanceId: 302, position: 1 }];
+    const restore = async (data: unknown) => { const body = new FormData(); body.append("file", new File([JSON.stringify(data)], "backup.json")); body.append("confirmation", "REPLACE"); return app.request("/api/import/json", { method: "POST", body }); };
+    try {
+      expect((await restore(snapshot)).status).toBe(200);
+      const restored = await createSnapshot();
+      expect(restored.vehicles).toEqual(snapshot.vehicles);
+      expect(restored.documents).toEqual(snapshot.documents);
+      expect(restored.documentMaintenanceLinks).toEqual(expect.arrayContaining(snapshot.documentMaintenanceLinks));
+      expect(restored.documentMaintenanceLinks).toHaveLength(4);
+      expect(restored.assets).toEqual(snapshot.assets);
+      const originalPath = (sqlite.query("SELECT storage_path FROM documents WHERE id = 91").get() as { storage_path: string }).storage_path;
+      try {
+        sqlite.query("UPDATE documents SET storage_path = ? WHERE id = 91").run(join(testRoot, "uploads", "unavailable.png"));
+        expect((await app.request("/api/export/json")).status).toBe(422);
+      } finally { sqlite.query("UPDATE documents SET storage_path = ? WHERE id = 91").run(originalPath); }
+    } finally { expect((await restore(baseline)).status).toBe(200); }
+  });
+
+  it("restores ZIP records and raw files, validates hashes and rejects unsafe or incomplete archives", async () => {
+    const { default: JSZip } = await import("jszip");
+    const { createSnapshot } = await import("./backup");
+    const before = await createSnapshot();
+    const response = await app.request("/api/export/backup.zip?vehicleId=999999");
+    expect(response.status).toBe(200);
+    const archive = await JSZip.loadAsync(await response.arrayBuffer());
+    const manifest = JSON.parse(await archive.file("backup.json")!.async("string"));
+    expect(manifest.formatVersion).toBe(4);
+    expect(manifest.vehicles).toEqual(before.vehicles);
+    for (const [key, asset] of Object.entries(manifest.assets) as [string, { file: string; data?: string; sha256: string }][]) {
+      expect(asset.data).toBeUndefined();
+      const bytes = await archive.file(asset.file)!.async("uint8array");
+      expect(Buffer.from(bytes).toString("base64")).toBe(before.assets[key].data!);
+    }
+    const form = async (zip: InstanceType<typeof JSZip>) => { const body = new FormData(); body.append("file", new File([await zip.generateAsync({ type: "arraybuffer" })], "backup.zip")); body.append("confirmation", "REPLACE"); return body; };
+    expect((await app.request("/api/import/preview", { method: "POST", body: await form(archive) })).status).toBe(200);
+    const restored = await app.request("/api/import/json", { method: "POST", body: await form(archive) });
+    expect(restored.status).toBe(200);
+    const result = await restored.json(); expect(result.backupUrl).toEndWith(".zip");
+    const recovery = await app.request(result.backupUrl);
+    expect(recovery.headers.get("Content-Type")).toBe("application/zip");
+    const recoveryZip = await JSZip.loadAsync(await recovery.arrayBuffer());
+    expect((await app.request("/api/import/preview", { method: "POST", body: await form(recoveryZip) })).status).toBe(200);
+    const after = await createSnapshot();
+    for (const [key, value] of Object.entries(before)) if (Array.isArray(value)) expect((after as Record<string, unknown>)[key]).toEqual(value);
+    expect(after.assets).toEqual(before.assets);
+    const firstAsset = Object.values(manifest.assets)[0] as { file: string };
+    archive.file(firstAsset.file, "corrupted bytes");
+    expect((await app.request("/api/import/json", { method: "POST", body: await form(archive) })).status).toBe(422);
+    archive.remove(firstAsset.file);
+    expect((await app.request("/api/import/preview", { method: "POST", body: await form(archive) })).status).toBe(422);
+    const unsafe = new JSZip(); unsafe.file("../escape.txt", "not allowed"); unsafe.file("backup.json", JSON.stringify(manifest));
+    expect((await app.request("/api/import/json", { method: "POST", body: await form(unsafe) })).status).toBe(422);
+    expect((await createSnapshot()).assets).toEqual(before.assets);
+  });
+
+  it("restores original files above 15 MB through HTTP above 128 MB, fractional stock and large record batches", async () => {
+    const { maxRequestBodySize } = await import("./requestLimits");
+    const { createSnapshot } = await import("./backup");
+    const original = await createSnapshot();
+    const snapshot = structuredClone(original);
+    snapshot.parts[0].quantity = 0.5;
+    // Large originals stay intact: a 97 MiB file makes a portable JSON body >128 MiB.
+    const bytes = Buffer.alloc(97 * 1024 * 1024, 65);
+    const digest = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+    const document = snapshot.documents[0];
+    snapshot.assets[`documents-${document.id}`] = { mimeType: "text/plain", data: bytes.toString("base64"), sha256: digest };
+    document.sizeBytes = bytes.length;
+    document.mimeType = "text/plain";
+    document.storagePath = `asset:documents-${document.id}`;
+    // Above the old per-field and per-table ceilings, and SQLite's statement variable limit.
+    snapshot.parts[0].notes = "Large historical notes. ".repeat(50_000);
+    snapshot.projectTasks = Array.from({ length: 100_001 }, (_, index) => ({ id: index + 1, projectId: snapshot.projects[0].id, title: `Task ${index}`, completed: false, estimatedCostCents: 0, position: index }));
+    const body = new FormData();
+    const file = new File([JSON.stringify(snapshot)], "large-backup.json", { type: "application/json" });
+    expect(file.size).toBeGreaterThan(128 * 1024 * 1024);
+    body.append("file", file); body.append("confirmation", "REPLACE");
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, maxRequestBodySize, idleTimeout: 120, fetch: app.fetch });
+    try {
+      const response = await fetch(new URL("/api/import/json", server.url), { method: "POST", body });
+      expect({ status: response.status, result: await response.json() }).toMatchObject({ status: 200, result: { ok: true } });
+      const stored = sqlite.query("SELECT storage_path FROM documents WHERE id = ?").get(Number(document.id)) as { storage_path: string };
+      const restored = await Bun.file(stored.storage_path).arrayBuffer();
+      expect(restored.byteLength).toBe(bytes.length);
+      expect(new Bun.CryptoHasher("sha256").update(restored).digest("hex")).toBe(digest);
+      expect(sqlite.query("SELECT quantity FROM parts WHERE id = ?").get(Number(snapshot.parts[0].id))).toEqual({ quantity: 0.5 });
+      expect(sqlite.query("SELECT count(*) AS count FROM project_tasks").get()).toEqual({ count: 100_001 });
+      const zipResponse = await fetch(new URL("/api/export/backup.zip", server.url));
+      expect(zipResponse.status).toBe(200);
+      const zipFile = new File([await zipResponse.arrayBuffer()], "large-backup.zip");
+      expect(zipFile.size).toBeLessThan(file.size);
+      const zipBody = new FormData(); zipBody.append("file", zipFile); zipBody.append("confirmation", "REPLACE");
+      const zipRestore = await fetch(new URL("/api/import/json", server.url), { method: "POST", body: zipBody });
+      expect(zipRestore.status).toBe(200);
+      const zipStored = sqlite.query("SELECT storage_path FROM documents WHERE id = ?").get(Number(document.id)) as { storage_path: string };
+      expect(new Bun.CryptoHasher("sha256").update(await Bun.file(zipStored.storage_path).arrayBuffer()).digest("hex")).toBe(digest);
+    } finally {
+      server.stop(true);
+      const restore = new FormData(); restore.append("file", new File([JSON.stringify(original)], "original.json")); restore.append("confirmation", "REPLACE");
+      const response = await app.request("/api/import/json", { method: "POST", body: restore });
+      expect(response.status).toBe(200);
+    }
+  }, 120000);
 
   it("downloads a readable whole-garage ZIP with an Excel index and working attachment links", async () => {
     const { default: JSZip } = await import("jszip");

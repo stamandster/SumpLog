@@ -16,7 +16,7 @@ Vehicle deletion requires a typed confirmation. It permanently removes that vehi
 
 Garage inventory items remain, but their link to the deleted vehicle is removed. Insurance policies also remain; only the vehicle-policy link is removed. A service task shared with another vehicle survives and is reassigned to one of its remaining vehicles internally.
 
-Create a JSON backup before deletion when the records may be needed later.
+Create a Full ZIP backup before deletion when the records may be needed later.
 
 ## Log maintenance
 
@@ -86,9 +86,11 @@ Settings provides four portability paths:
 - **Export ZIP (Excel + files):** a human-readable `SumpLog.xlsx` workbook plus vehicle, service, project, insurance, and garage folders. Extract the complete ZIP before using workbook links.
 - **Maintenance PDF:** from Maintenance, export one, several, or all filtered/selected records. Each record is kept with its evidence; PDF receipts precede other evidence for that record. The report uses a print-friendly white background with SumpLog typography and accent styling.
 - **CSV summary:** a lightweight multi-section text export without binary attachments.
-- **Full JSON backup:** a restorable snapshot containing records and base64-encoded stored assets.
+- **Full ZIP backup:** the supported restore file for all vehicles and garage records. It contains `backup.json` and original vehicle photos, document images, PDF receipts and other attachments in `assets/`, without Base64 encoding. It preserves shared maintenance links, attachment order, UUIDs, display names, image adjustments and fractional consumable balances. The current owner password and browser interface preferences are excluded and remain unchanged during restore.
 
-JSON restore replaces the whole garage. SumpLog validates the file, shows record counts and warnings, requires the word `REPLACE`, and writes a pre-restore recovery backup before changing records. The upload limit for restore is 120 MB. For larger installations, stop the server and copy the full data directory instead.
+Select the complete ZIP in Restore ZIP or legacy JSON backup; do not extract it first. Existing version 2/3 JSON backups still work. The readable Excel export is a different ZIP and cannot be restored. Restore replaces the whole garage, regardless of the selected vehicle, requires `REPLACE`, and writes a pre-restore recovery ZIP. Missing attachments, unsafe archive entries and failed checksums block restore before records change.
+
+There is no app-imposed backup size limit. ZIP file processing uses streams and temporary disk storage, without loading all decoded attachments into memory. JSON records and multipart uploads still use memory. Allow disk space for staging, recovery and restored files; reverse proxies may have their own limits. Store backups securely on another device. For a host-level backup including credentials and configuration, stop the app and copy its database, uploads and configuration together.
 
 ## Change the owner password
 

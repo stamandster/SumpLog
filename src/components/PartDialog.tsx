@@ -4,7 +4,7 @@ import { SelectOrCustom } from "./SelectOrCustom";
  * states: default · hover · focus · active · disabled · loading · error · success
  * contrast: pass (46–50)
  */
-import { AlertTriangle, Check, LoaderCircle, Trash2, X } from "lucide-react";
+import { AlertTriangle, Check, Copy, LoaderCircle, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Part, PartInput, Vehicle } from "../api";
 
@@ -31,19 +31,21 @@ type FormState = {
   vehicleNotes: Record<number, string>;
 };
 
-function initialForm(part: Part | null, activeVehicle: Vehicle | null): FormState {
+export function initialPartForm(part: Part | null, activeVehicle: Vehicle | null, cloneSource: Part | null = null): FormState {
+  const cloning = !part && Boolean(cloneSource);
+  part = part ?? cloneSource;
   return {
     itemType: part?.itemType ?? "Part",
     category: part?.category ?? "",
     specifications: part?.specifications ?? "",
     approvals: part?.approvals ?? "",
-    partNumber: part?.partNumber ?? "",
+    partNumber: cloning ? "" : part?.partNumber ?? "",
     name: part?.name ?? "",
     manufacturer: part?.manufacturer ?? "",
     supplierName: part?.supplierName ?? "",
     supplierUrl: part?.supplierUrl ?? "",
     purchasePrice: part ? (part.purchasePriceCents / 100).toFixed(2) : "",
-    quantity: String(part?.quantity ?? 0),
+    quantity: cloning ? "0" : String(part?.quantity ?? 0),
     volumePerUnit: part?.volumePerUnit == null ? "" : String(part.volumePerUnit),
     volumeUnit: part?.volumeUnit ?? "",
     minimumQuantity: String(part?.minimumQuantity ?? 0),
@@ -63,6 +65,8 @@ function needsCustomStorageLocation(part: Part | null, storageLocations: string[
 export function PartDialog({
   open,
   part,
+  cloneSource = null,
+  onClone,
   vehicle,
   vehicles,
   storageLocations,
@@ -74,6 +78,8 @@ export function PartDialog({
 }: {
   open: boolean;
   part: Part | null;
+  cloneSource?: Part | null;
+  onClone?: (part: Part) => void;
   vehicle: Vehicle | null;
   vehicles: Vehicle[];
   storageLocations: string[];
@@ -84,8 +90,8 @@ export function PartDialog({
   onDelete: (part: Part) => Promise<void>;
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
-  const [form, setForm] = useState(() => initialForm(part, vehicle));
-  const [customStorageLocation, setCustomStorageLocation] = useState(() => needsCustomStorageLocation(part, storageLocations));
+  const [form, setForm] = useState(() => initialPartForm(part, vehicle, cloneSource));
+  const [customStorageLocation, setCustomStorageLocation] = useState(() => needsCustomStorageLocation(part ?? cloneSource, storageLocations));
   const [touched, setTouched] = useState<Record<string, boolean>>({});
   const [status, setStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [operation, setOperation] = useState<"save" | "delete">("save");
@@ -96,8 +102,8 @@ export function PartDialog({
     const dialog = dialogRef.current;
     if (!dialog) return;
     if (open && !dialog.open) {
-      setForm(initialForm(part, vehicle));
-      setCustomStorageLocation(needsCustomStorageLocation(part, storageLocations));
+      setForm(initialPartForm(part, vehicle, cloneSource));
+      setCustomStorageLocation(needsCustomStorageLocation(part ?? cloneSource, storageLocations));
       setTouched({});
       setStatus("idle");
       setOperation("save");
@@ -108,13 +114,13 @@ export function PartDialog({
     } else if (!open && dialog.open) {
       dialog.close();
     }
-  }, [open, part]);
+  }, [open, part, cloneSource]);
 
   const errors = useMemo(() => {
     const next: Record<string, string> = {};
     if (!form.partNumber.trim()) next.partNumber = "Enter a part number.";
     if (form.name.trim().length < 2) next.name = "Enter a description with at least 2 characters.";
-    if (!Number.isInteger(Number(form.quantity)) || Number(form.quantity) < 0) next.quantity = "Use a whole number of zero or more.";
+    if (!Number.isFinite(Number(form.quantity)) || Number(form.quantity) < 0 || (form.itemType !== "Consumable" && !Number.isInteger(Number(form.quantity)))) next.quantity = form.itemType === "Consumable" ? "Use a number of zero or more." : "Use a whole number of zero or more.";
     if (form.volumePerUnit && (!Number.isFinite(Number(form.volumePerUnit)) || Number(form.volumePerUnit) <= 0)) next.volumePerUnit = "Use a positive volume.";
     if (form.volumePerUnit && !form.volumeUnit.trim()) next.volumeUnit = "Choose or enter a unit.";
     if (!form.volumePerUnit && form.volumeUnit.trim()) next.volumePerUnit = "Enter the volume for each unit.";
@@ -196,15 +202,16 @@ export function PartDialog({
   const fieldError = (name: string) => touched[name] ? errors[name] : undefined;
 
   return (
-    <dialog ref={dialogRef} aria-label={part ? "Edit inventory part" : "Add inventory part"} className="maintenance-dialog part-dialog" onCancel={(event) => { event.preventDefault(); close(); }} onClose={onClose}>
+    <dialog ref={dialogRef} aria-label={part ? "Edit inventory part" : cloneSource ? "Clone inventory item" : "Add inventory part"} className="maintenance-dialog part-dialog" onCancel={(event) => { event.preventDefault(); close(); }} onClose={onClose}>
       <form method="dialog" onSubmit={submit} noValidate>
         <header className="dialog__header">
           <div>
             <span className="panel__kicker">Garage-wide inventory</span>
-            <h2>{part ? "Edit inventory part" : "Add inventory part"}</h2>
+            <h2>{part ? "Edit inventory part" : cloneSource ? `Clone ${cloneSource.itemType === "Consumable" ? "consumable" : "part"}` : "Add inventory part"}</h2>
           </div>
           <button type="button" className="icon-button" onClick={close} aria-label="Close part form"><X size={19} /></button>
         </header>
+        {cloneSource && <p className="part-clone-note">Copy of {cloneSource.name}. Enter a new part number and review the details. Stock starts at zero; the original item is unchanged.</p>}
 
         <div className="form-grid">
           <Field label="Item type" name="itemType"><select id="itemType" value={form.itemType} onChange={(event) => update("itemType", event.target.value)}><option>Part</option><option>Consumable</option></select></Field>
@@ -229,7 +236,8 @@ export function PartDialog({
             {customStorageLocation && <input id="customStorageLocation" value={form.storageLocation} onChange={(event) => update("storageLocation", event.target.value)} placeholder="e.g. Shelf B-2" aria-label="Custom storage location" />}
           </Field>
           <Field label="Quantity" name="quantity" error={fieldError("quantity")}>
-            <input id="quantity" type="number" min="0" step="1" inputMode="numeric" value={form.quantity} onChange={(e) => update("quantity", e.target.value)} onBlur={() => setTouched((t) => ({ ...t, quantity: true }))} aria-invalid={Boolean(fieldError("quantity"))} />
+            <input id="quantity" type="number" min="0" step={form.itemType === "Consumable" ? "any" : "1"} inputMode={form.itemType === "Consumable" ? "decimal" : "numeric"} value={form.quantity} onChange={(e) => update("quantity", e.target.value)} onBlur={() => setTouched((t) => ({ ...t, quantity: true }))} aria-invalid={Boolean(fieldError("quantity"))} />
+            {form.itemType === "Consumable" && <small className="field-note">Remaining container-equivalent units; partial maintenance use deducts only the amount used.</small>}
           </Field>
           <Field label="Volume per unit" name="volumePerUnit" error={fieldError("volumePerUnit")} help="Optional, for fluids such as oil, coolant, or brake fluid.">
             <input id="volumePerUnit" type="number" min="0" step="any" inputMode="decimal" value={form.volumePerUnit} onChange={(e) => update("volumePerUnit", e.target.value)} onBlur={() => setTouched((t) => ({ ...t, volumePerUnit: true }))} placeholder="e.g. 5" aria-invalid={Boolean(fieldError("volumePerUnit"))} />
@@ -271,7 +279,7 @@ export function PartDialog({
         )}
         <div className="dialog__status" aria-live="polite">{submitError || (status === "success" ? (part && deleteConfirm ? "Part deleted." : "Part saved.") : "")}</div>
         <footer className="dialog__footer dialog__footer--split">
-          <div>{part && <button type="button" className="button button--quiet button--destructive-quiet" onClick={() => setDeleteConfirm(true)} disabled={status === "loading"}><Trash2 size={16} />Delete part</button>}</div>
+          <div>{part && onClone && <button type="button" className="button button--quiet" disabled={status === "loading"} onClick={() => onClone(part)}><Copy size={16} />Clone</button>}{part && <button type="button" className="button button--quiet button--destructive-quiet" onClick={() => setDeleteConfirm(true)} disabled={status === "loading"}><Trash2 size={16} />Delete part</button>}</div>
           <div className="dialog__footer-actions">
             <button type="button" className="button button--quiet" onClick={close} disabled={status === "loading"}>Cancel</button>
             <button type="submit" className="button button--primary" disabled={status === "loading" || status === "success"} data-state={status}>

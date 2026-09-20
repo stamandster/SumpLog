@@ -11,17 +11,23 @@ import { DashboardPlaceholder, DocumentsView, InsuranceView, MaintenanceView, Pa
 import { SecondaryPanels } from "./components/SecondaryPanels";
 import { MobileNav, Sidebar, type Section } from "./components/Sidebar";
 import { StatusStrip } from "./components/StatusStrip";
-import { Topbar, vehicleLabel } from "./components/Topbar";
+import { Topbar, VehicleContext } from "./components/Topbar";
 import { VehicleSummary } from "./components/VehicleSummary";
+import { availableEvidenceIds } from "./maintenanceEvidenceSelection";
 
 export default function App() {
   const pathSection = window.location.pathname.slice(1) as Section;
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [vehicleId, setVehicleId] = useState<number | null>(null);
+  const [vehicleDetailsRequest, setVehicleDetailsRequest] = useState<number | null>(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("details") === "mileage" ? Number(params.get("vehicle")) || null : null;
+  });
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [vehicleParts, setVehicleParts] = useState<Part[]>([]);
   const [garageParts, setGarageParts] = useState<Part[]>([]);
   const [maintenance, setMaintenance] = useState<MaintenanceRecord[]>([]);
+  const [maintenanceOptions, setMaintenanceOptions] = useState<import("./maintenanceOptions").MaintenanceOptions>({ systems: [], shops: [] });
   const [documents, setDocuments] = useState<DocumentRecord[]>([]);
   const [insurancePolicies, setInsurancePolicies] = useState<InsurancePolicy[]>([]);
   const [mileage, setMileage] = useState<MileageEntry[]>([]);
@@ -64,6 +70,7 @@ export default function App() {
   const [editingReminder, setEditingReminder] = useState<Reminder | null>(null);
   const [partDialogOpen, setPartDialogOpen] = useState(false);
   const [editingPart, setEditingPart] = useState<Part | null>(null);
+  const [cloningPart, setCloningPart] = useState<Part | null>(null);
   const [insuranceDialogOpen, setInsuranceDialogOpen] = useState(false);
   const [editingInsurance, setEditingInsurance] = useState<InsurancePolicy | null>(null);
   const [announcement, setAnnouncement] = useState("");
@@ -90,11 +97,15 @@ export default function App() {
   const navigate = useCallback((next: Section, replace = false) => {
     setSection(next);
     const url = new URL(window.location.href); url.pathname = next === "dashboard" ? "/" : `/${next}`;
-    window.history[replace ? "replaceState" : "pushState"]({}, "", url);
+    url.searchParams.delete("details");
+    setVehicleDetailsRequest(null);
+    // Ordinary area navigation keeps the current maintenance expansion choices.
+    // Explicit record links still create a fresh history entry to open their target.
+    window.history[replace ? "replaceState" : "pushState"](window.history.state, "", url);
   }, []);
 
   useEffect(() => {
-    const onPop = () => { const value = window.location.pathname.slice(1) as Section; setSection(["dashboard","maintenance","parts","specs","projects","documents","insurance","calculators","vehicles","settings"].includes(value) ? value : "dashboard"); const id = Number(new URL(window.location.href).searchParams.get("vehicle")); if (Number.isInteger(id) && id > 0) setVehicleId(id); };
+    const onPop = () => { const value = window.location.pathname.slice(1) as Section; setSection(["dashboard","maintenance","parts","specs","projects","documents","insurance","calculators","vehicles","settings"].includes(value) ? value : "dashboard"); const params = new URL(window.location.href).searchParams; const id = Number(params.get("vehicle")); if (Number.isInteger(id) && id > 0) setVehicleId(id); setVehicleDetailsRequest(params.get("details") === "mileage" && id > 0 ? id : null); };
     window.addEventListener("popstate", onPop); return () => window.removeEventListener("popstate", onPop);
   }, []);
 
@@ -104,7 +115,7 @@ export default function App() {
     setLoading(true);
     setError("");
     try {
-      const [dashboardData, partData, maintenanceData, documentData, mileageData, planData, reminderData, specData, projectData, alertData] = await Promise.all([
+      const [dashboardData, partData, maintenanceData, documentData, mileageData, planData, reminderData, specData, projectData, alertData, optionData] = await Promise.all([
         api.dashboard(id),
         api.parts(id),
         api.maintenance(id),
@@ -115,12 +126,14 @@ export default function App() {
         api.specs(id),
         api.projects(id),
         api.alerts(id),
+        api.maintenanceOptions(),
       ]);
       if (generation !== loadGeneration.current) return;
       setDashboard(dashboardData);
       setVehicles((current) => current.map((vehicle) => vehicle.id === id ? dashboardData.vehicle : vehicle));
       setVehicleParts(partData);
       setMaintenance(maintenanceData);
+      setMaintenanceOptions(optionData);
       setDocuments(documentData);
       setMileage(mileageData);
       setServicePlans(planData);
@@ -194,7 +207,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!vehicleId) return; const url = new URL(window.location.href); url.searchParams.set("vehicle", String(vehicleId)); window.history.replaceState({}, "", url);
+    if (!vehicleId) return; const url = new URL(window.location.href); url.searchParams.set("vehicle", String(vehicleId)); window.history.replaceState(window.history.state, "", url);
   }, [vehicleId]);
 
   const refreshVehicles = async (selectedId?: number) => {
@@ -212,6 +225,7 @@ export default function App() {
 
   const saveMaintenance = async (input: MaintenanceInput, attachments: import("./api").MaintenanceAttachment[], documentIds: number[]) => {
     if (!vehicleId) return;
+    documentIds = availableEvidenceIds(documentIds, documents, vehicleId);
     const payload = { ...input, ...(!editingMaintenance && dueToClear ? { dueSourceId: dueToClear } : {}) };
     const saved = attachments.length ? await api.saveMaintenanceBundle(vehicleId, editingMaintenance?.id ?? null, payload, attachments) : editingMaintenance ? await api.updateMaintenance(editingMaintenance.id, payload) : await api.addMaintenance(vehicleId, payload);
     const eligibleDocuments = documents.filter((document) => document.vehicleId === vehicleId && !document.insurancePolicyId);
@@ -221,8 +235,11 @@ export default function App() {
       if (currentlyLinked === shouldBeLinked) continue;
       await api.updateDocument(document.id, { name: document.name, notes: document.notes ?? undefined, kind: document.kind, vehicleId: document.vehicleId, maintenanceIds: shouldBeLinked ? [...new Set([...currentIds, saved.id])] : currentIds.filter((id) => id !== saved.id), projectId: document.projectId ?? null });
     }
+    // New bundle uploads are appended in their selected order; stored evidence is
+    // then placed in the order selected in the dialog for this one service record.
+    await api.reorderMaintenanceEvidence(saved.id, documentIds);
     setMaintenancePrefill(null); setDueToClear(null);
-    await loadVehicle(vehicleId);
+    await Promise.all([loadVehicle(vehicleId), loadGarageParts()]);
     setAnnouncement(`${input.title} was ${editingMaintenance ? "updated" : "added"}${attachments.length || documentIds.length ? ` with ${attachments.length + documentIds.length} attachment${attachments.length + documentIds.length === 1 ? "" : "s"}` : ""}.`);
   };
 
@@ -236,7 +253,7 @@ export default function App() {
   const changeReminder = async (id: number, status: Reminder["status"]) => { if (!vehicleId) return; await api.updateReminder(id, status); await loadVehicle(vehicleId); setAnnouncement(`Reminder marked ${status.toLowerCase()}.`); };
   const changeVehiclePhoto = async (id: number, file: File) => { await api.uploadVehicleImage(id, file); await refreshVehicles(id); await loadVehicle(id); setAnnouncement("Vehicle photo updated."); };
   const removeVehiclePhoto = async (id: number) => { await api.removeVehicleImage(id); await refreshVehicles(id); await loadVehicle(id); setAnnouncement("Vehicle photo removed."); };
-  const setMaintenanceVoided = async (record: MaintenanceRecord, voided: boolean) => { if (!vehicleId) return; try { await api.setMaintenanceVoided(record.id, voided); await loadVehicle(vehicleId); setAnnouncement(`${record.title} was ${voided ? "voided" : "restored"}.`); } catch (cause) { setError(cause instanceof Error ? cause.message : "Maintenance status could not be changed."); } };
+  const setMaintenanceVoided = async (record: MaintenanceRecord, voided: boolean) => { if (!vehicleId) return; try { await api.setMaintenanceVoided(record.id, voided); await Promise.all([loadVehicle(vehicleId), loadGarageParts()]); setAnnouncement(`${record.title} was ${voided ? "voided" : "restored"}.`); } catch (cause) { setError(cause instanceof Error ? cause.message : "Maintenance status could not be changed."); } };
   const saveVehicle = async (input: VehicleUpdateInput) => { if (!vehicleId) return; await api.updateVehicle(vehicleId, input); await refreshVehicles(vehicleId); await loadVehicle(vehicleId); setAnnouncement("Vehicle details updated."); };
   const deleteVehicle = async (vehicle: Vehicle) => {
     await api.deleteVehicle(vehicle.id);
@@ -286,7 +303,7 @@ export default function App() {
   };
   const uploadDocument = async (input: { vehicleId: number; maintenanceIds: number[]; kind: string; name: string; notes?: string; file: File }) => { await api.uploadDocument(input); if (vehicleId) await loadVehicle(vehicleId); setAnnouncement(`${input.name} was uploaded and linked to ${input.maintenanceIds.length} maintenance record${input.maintenanceIds.length === 1 ? "" : "s"}.`); };
   const saveDocument = async (document: DocumentRecord, input: { notes?: string; name: string; kind: string; vehicleId: number | null; maintenanceIds: number[] }) => { await api.updateDocument(document.id, { ...input, projectId: input.vehicleId === document.vehicleId ? document.projectId : null }); setDocuments(await api.documents()); if (vehicleId) await loadVehicle(vehicleId); setAnnouncement("Document details and maintenance links updated."); };
-  const deleteDocument = async (document: DocumentRecord) => { await api.deleteDocument(document.id); setDocuments(await api.documents()); if (vehicleId) await loadVehicle(vehicleId); setAnnouncement(`${document.name} was deleted.`); };
+  const deleteDocument = async (document: DocumentRecord) => { await api.deleteDocument(document.id); setDocuments((current) => current.filter((file) => file.id !== document.id)); setDocuments(await api.documents()); if (vehicleId) await loadVehicle(vehicleId); setAnnouncement(`${document.name} was deleted.`); };
   const openNewInsurance = () => { setEditingInsurance(null); setInsuranceDialogOpen(true); };
   const saveInsurance = async (input: InsuranceInput) => { if (editingInsurance) await api.updateInsurance(editingInsurance.id, input); else await api.addInsurance(input); await refreshInsurance(); if (vehicleId) await loadVehicle(vehicleId); setAnnouncement(`Insurance policy ${editingInsurance ? "updated" : "added"}.`); };
   const deleteInsurance = async (policy: InsurancePolicy) => { await api.deleteInsurance(policy.id); await refreshInsurance(); if (vehicleId) await loadVehicle(vehicleId); setAnnouncement(`${policy.provider} insurance policy deleted.`); };
@@ -296,11 +313,13 @@ export default function App() {
   const deleteReminder = async (reminder: Reminder) => { if (!vehicleId) return; await api.deleteReminder(reminder.id); await loadVehicle(vehicleId); setAnnouncement(`${reminder.title} was deleted.`); };
 
   const openNewPart = () => {
+    setCloningPart(null);
     setEditingPart(null);
     setPartDialogOpen(true);
   };
 
   const openPart = (part: Part) => {
+    setCloningPart(null);
     setEditingPart(part);
     setPartDialogOpen(true);
   };
@@ -308,6 +327,8 @@ export default function App() {
   const refreshPartViews = async () => {
     await Promise.all([loadGarageParts(), vehicleId ? loadVehicle(vehicleId) : Promise.resolve()]);
   };
+
+  const clonePart = (part: Part) => { setEditingPart(null); setCloningPart(part); setPartDialogOpen(true); };
 
   const savePart = async (input: PartInput) => {
     const saved = editingPart ? await api.updatePart(editingPart.id, input) : await api.addPart(input);
@@ -327,7 +348,7 @@ export default function App() {
     setAnnouncement(`${selectedParts.length} inventory part${selectedParts.length === 1 ? " was" : "s were"} deleted.`);
   };
 
-  if (!authChecked || (loading && !dashboard && !(["settings", "insurance", "parts"] as Section[]).includes(section) && authenticated)) {
+  if (!authChecked || (loading && !dashboard && !(["settings", "insurance", "parts", "vehicles"] as Section[]).includes(section) && authenticated)) {
     return <main className="boot-state"><LoaderCircle className="spin" size={26} /><span>Opening the garage…</span></main>;
   }
 
@@ -352,14 +373,9 @@ export default function App() {
         <main className="content" id="main-content">
           {error && dashboard && <div className="error-banner" role="alert"><AlertTriangle size={18} /><span>{error}</span><button className="button button--quiet button--small" onClick={() => vehicleId && void loadVehicle(vehicleId)}>Retry</button><button className="icon-button" aria-label="Dismiss error" onClick={() => setError("")}>×</button></div>}
           {section === "dashboard" && vehicles.length > 1 && (
-            <label className="vehicle-picker">
-              <span>Selected vehicle</span>
-              <select value={vehicleId ?? ""} onChange={(event) => setVehicleId(Number(event.target.value))}>
-                {vehicles.map((vehicle) => <option value={vehicle.id} key={vehicle.id}>{vehicleLabel(vehicle)} · #{vehicle.id}</option>)}
-              </select>
-            </label>
+            <VehicleContext className="vehicle-picker" vehicles={vehicles} vehicleId={vehicleId} onSelectVehicle={setVehicleId} state={loading ? "loading" : "default"} />
           )}
-          {section === "calculators" ? <GarageCalculators /> : section === "settings" ? <SettingsView density={density} onDensityChange={setDensity} authRequired={authRequired} onLogout={async () => { await api.logout(); window.location.reload(); }} onImportBackup={async (file) => { const result = await api.importBackup(file); const nextVehicles = await api.vehicles(); setVehicles(nextVehicles); setVehicleId(nextVehicles[0]?.id ?? null); if (nextVehicles.length) await loadVehicle(nextVehicles[0].id); else setDashboard(null); return result; }} /> : section === "insurance" ? <InsuranceView policies={insurancePolicies} documents={documents} onAdd={openNewInsurance} onEdit={(policy) => { setEditingInsurance(policy); setInsuranceDialogOpen(true); }} onAttach={uploadInsuranceDocument} onDeleteDocument={deleteDocument} /> : section === "documents" ? <DocumentsView documents={documents} vehicles={vehicles} onAdd={vehicles.length ? openNewDocument : () => { navigate("insurance"); setAnnouncement("Attach documents to an insurance policy, or add a vehicle for vehicle documents."); }} onEdit={(document) => { setEditingDocument(document); setDocumentDialogOpen(true); }} onOpenMaintenance={openDocumentMaintenance} /> : section === "parts" ? <PartsView parts={visibleParts} vehicles={vehicles} loading={partsLoading} onAdd={openNewPart} onEdit={openPart} onDeleteSelected={deleteParts} /> : dashboard ? (
+          {section === "vehicles" ? <VehiclesView vehicles={vehicles} policies={insurancePolicies} activeVehicleId={vehicleId} initialExpandedVehicleId={vehicleDetailsRequest} mileage={mileage} mileageLoading={loading || dashboard?.vehicle.id !== vehicleId} alerts={alerts} onSelect={setVehicleId} onAdd={() => setVehicleDialogOpen(true)} onEdit={() => setVehicleEditOpen(true)} onDelete={setVehicleToDelete} onAddMileage={() => { setEditingMileage(null); setMileageDialogOpen(true); }} onEditMileage={(entry) => { setEditingMileage(entry); setMileageDialogOpen(true); }} onChangePhoto={changeVehiclePhoto} onRemovePhoto={removeVehiclePhoto} /> : section === "calculators" ? <GarageCalculators /> : section === "settings" ? <SettingsView density={density} onDensityChange={setDensity} authRequired={authRequired} onLogout={async () => { await api.logout(); window.location.reload(); }} onImportBackup={async (file) => { const result = await api.importBackup(file); const nextVehicles = await api.vehicles(); setVehicles(nextVehicles); setVehicleId(nextVehicles[0]?.id ?? null); if (nextVehicles.length) await loadVehicle(nextVehicles[0].id); else setDashboard(null); return result; }} /> : section === "insurance" ? <InsuranceView policies={insurancePolicies} documents={documents} onAdd={openNewInsurance} onEdit={(policy) => { setEditingInsurance(policy); setInsuranceDialogOpen(true); }} onAttach={uploadInsuranceDocument} onDeleteDocument={deleteDocument} /> : section === "documents" ? <DocumentsView documents={documents} vehicles={vehicles} onAdd={vehicles.length ? openNewDocument : () => { navigate("insurance"); setAnnouncement("Attach documents to an insurance policy, or add a vehicle for vehicle documents."); }} onEdit={(document) => { setEditingDocument(document); setDocumentDialogOpen(true); }} onOpenMaintenance={openDocumentMaintenance} /> : section === "parts" ? <PartsView parts={visibleParts} vehicles={vehicles} loading={partsLoading} onAdd={openNewPart} onEdit={openPart} onClone={clonePart} onDeleteSelected={deleteParts} /> : dashboard ? (
             <ActiveSection
               section={section}
               dashboard={dashboard}
@@ -375,7 +391,7 @@ export default function App() {
               onDeleteSelected={deleteParts}
               vehicles={vehicles}
               activeVehicleId={vehicleId}
-              onSelectVehicle={(id) => { setVehicleId(id); navigate("vehicles"); }}
+              onSelectVehicle={(id) => { setVehicleId(id); navigate("vehicles"); setVehicleDetailsRequest(id); const url = new URL(window.location.href); url.searchParams.set("vehicle", String(id)); url.searchParams.set("details", "mileage"); window.history.replaceState(window.history.state, "", url); }}
               density={density}
               onDensityChange={setDensity}
               documents={documents}
@@ -422,9 +438,9 @@ export default function App() {
       <MobileNav section={section} onSectionChange={navigate} />
       {dashboard && (
         <>
-          <MaintenanceDialog open={dialogOpen} record={editingMaintenance} vehicle={dashboard.vehicle} parts={parts} documents={documents} onDeleteDocument={deleteDocument} prefill={maintenancePrefill} shopNames={maintenance.map((record) => record.shopName).filter((shopName): shopName is string => Boolean(shopName))} onClose={() => setDialogOpen(false)} onSubmit={saveMaintenance} />
+          <MaintenanceDialog open={dialogOpen} record={editingMaintenance} vehicle={dashboard.vehicle} parts={parts} documents={documents} onDeleteDocument={deleteDocument} prefill={maintenancePrefill} shopNames={maintenanceOptions.shops} systemNames={maintenanceOptions.systems} onClose={() => setDialogOpen(false)} onSubmit={saveMaintenance} />
           <MileageDialog open={mileageDialogOpen} vehicle={dashboard.vehicle} entry={editingMileage} onClose={() => setMileageDialogOpen(false)} onSubmit={saveMileage} />
-          <ServicePlanDialog open={planDialogOpen} vehicle={dashboard.vehicle} vehicles={vehicles} plan={editingPlan} prefill={planPrefill} onClose={() => setPlanDialogOpen(false)} onSubmit={savePlan} onDelete={deletePlan} />
+          <ServicePlanDialog systemNames={maintenanceOptions.systems} open={planDialogOpen} vehicle={dashboard.vehicle} vehicles={vehicles} plan={editingPlan} prefill={planPrefill} onClose={() => setPlanDialogOpen(false)} onSubmit={savePlan} onDelete={deletePlan} />
           <VehicleEditDialog open={vehicleEditOpen} vehicle={dashboard.vehicle} vehicles={vehicles} onClose={() => setVehicleEditOpen(false)} onSave={saveVehicle} onDelete={deleteVehicle} />
           <SpecDialog open={specDialogOpen} spec={editingSpec} groups={specs.map((spec) => spec.groupName)} onClose={() => setSpecDialogOpen(false)} onSave={saveSpec} onDelete={deleteSpec} />
           <ProjectDialog open={projectDialogOpen} project={editingProject} onClose={() => setProjectDialogOpen(false)} onSave={saveProject} onDelete={deleteProject} />
@@ -432,7 +448,7 @@ export default function App() {
           <ReminderDialog open={reminderDialogOpen} reminder={editingReminder} plans={servicePlans} onClose={() => setReminderDialogOpen(false)} onSave={saveReminder} onDelete={deleteReminder} />
         </>
       )}
-      <PartDialog open={partDialogOpen} part={editingPart} vehicle={dashboard?.vehicle ?? vehicles.find((vehicle) => vehicle.id === vehicleId) ?? null} vehicles={vehicles} storageLocations={[...new Set([...garageParts, ...vehicleParts].map((part) => part.storageLocation).filter((location): location is string => Boolean(location)))]} manufacturers={[...garageParts, ...vehicleParts].map((part) => part.manufacturer).filter((manufacturer): manufacturer is string => Boolean(manufacturer))} suppliers={[...garageParts, ...vehicleParts].map((part) => part.supplierName).filter((supplier): supplier is string => Boolean(supplier))} onClose={() => setPartDialogOpen(false)} onSave={savePart} onDelete={deletePart} />
+      <PartDialog key={editingPart ? `edit-${editingPart.id}` : cloningPart ? `clone-${cloningPart.id}` : "new"} cloneSource={cloningPart} onClone={clonePart} open={partDialogOpen} part={editingPart} vehicle={dashboard?.vehicle ?? vehicles.find((vehicle) => vehicle.id === vehicleId) ?? null} vehicles={vehicles} storageLocations={[...new Set([...garageParts, ...vehicleParts].map((part) => part.storageLocation).filter((location): location is string => Boolean(location)))]} manufacturers={[...garageParts, ...vehicleParts].map((part) => part.manufacturer).filter((manufacturer): manufacturer is string => Boolean(manufacturer))} suppliers={[...garageParts, ...vehicleParts].map((part) => part.supplierName).filter((supplier): supplier is string => Boolean(supplier))} onClose={() => setPartDialogOpen(false)} onSave={savePart} onDelete={deletePart} />
       <DocumentDialog open={documentDialogOpen} document={editingDocument} vehicles={vehicles} activeVehicleId={vehicleId} onClose={() => setDocumentDialogOpen(false)} onUpload={uploadDocument} onSave={saveDocument} onDelete={deleteDocument} />
       <VehicleDialog open={vehicleDialogOpen} vehicles={vehicles} onClose={() => setVehicleDialogOpen(false)} onSubmit={addVehicle} />
       {vehicleToDelete && <VehicleDeleteDialog key={vehicleToDelete.id} vehicle={vehicleToDelete} onClose={() => setVehicleToDelete(null)} onDelete={deleteVehicle} />}
@@ -524,14 +540,13 @@ function ActiveSection({
   if (section === "projects") return <ProjectsView projects={projects} onAdd={onAddProject} onEdit={onEditProject} onToggleTask={onToggleProjectTask} />;
   if (section === "documents") return <DocumentsView documents={documents} vehicles={vehicles} onAdd={onAddDocument} onEdit={onEditDocument} />;
   if (section === "insurance") return <InsuranceView policies={insurancePolicies} documents={documents} onAdd={onAddInsurance} onEdit={onEditInsurance} onAttach={onAttachInsuranceDocument} onDeleteDocument={onDeleteDocument} />;
-  if (section === "vehicles") return <VehiclesView vehicles={vehicles} policies={insurancePolicies} activeVehicleId={activeVehicleId} mileage={mileage} alerts={alerts} onSelect={onSelectVehicle} onAdd={onAddVehicle} onEdit={onEditVehicle} onDelete={onDeleteVehicle} onAddMileage={onAddMileage} onEditMileage={onEditMileage} onChangePhoto={onChangePhoto} onRemovePhoto={onRemovePhoto} />;
   if (section === "settings") return <SettingsView density={density} onDensityChange={onDensityChange} onImportBackup={onImportBackup} authRequired={authRequired} onLogout={async () => { await api.logout(); window.location.reload(); }} />;
 
   const openParts = (stock?: "low") => {
     const url = new URL(window.location.href);
     url.pathname = "/parts";
     if (stock) url.searchParams.set("stock", stock); else url.searchParams.delete("stock");
-    window.history.pushState({}, "", url);
+    window.history.pushState(window.history.state, "", url);
     window.dispatchEvent(new PopStateEvent("popstate"));
   };
 

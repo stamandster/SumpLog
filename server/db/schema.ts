@@ -106,6 +106,7 @@ export const parts = sqliteTable(
     supplierName: text("supplier_name"),
     supplierUrl: text("supplier_url"),
     purchasePriceCents: integer("purchase_price_cents").notNull().default(0),
+    // SQLite's INTEGER affinity preserves fractional values for partially used consumables.
     quantity: integer("quantity").notNull().default(0),
     volumePerUnit: real("volume_per_unit"),
     volumeUnit: text("volume_unit"),
@@ -268,10 +269,12 @@ export const documentMaintenanceLinks = sqliteTable(
   {
     documentId: integer("document_id").notNull().references(() => documents.id, { onDelete: "cascade" }),
     maintenanceId: integer("maintenance_id").notNull().references(() => maintenanceRecords.id, { onDelete: "cascade" }),
+    /** Display/export order is scoped to this maintenance record. */
+    position: integer("position").notNull().default(0),
   },
   (table) => [
     primaryKey({ columns: [table.documentId, table.maintenanceId] }),
-    index("document_maintenance_links_record_idx").on(table.maintenanceId, table.documentId),
+    index("document_maintenance_links_record_idx").on(table.maintenanceId, table.position, table.documentId),
   ],
 );
 

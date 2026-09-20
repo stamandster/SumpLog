@@ -23,10 +23,12 @@
     "hono": "^4.13.5",
     "lucide-react": "^1.39.0",
     "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^6.3.289",
     "pdfkit": "^0.20.2",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "sharp": "^0.35.4",
+    "yauzl": "^3.4.0",
     "zod": "^4.5.4"
   },
   "devDependencies": {
@@ -34,6 +36,7 @@
     "@types/archiver": "^8.0.0",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.5",
+    "@types/yauzl": "^3.4.0",
     "@vitejs/plugin-react": "^6.1.1",
     "bun-types": "^1.4.0",
     "drizzle-kit": "^0.31.10",

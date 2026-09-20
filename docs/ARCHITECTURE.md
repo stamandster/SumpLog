@@ -83,7 +83,9 @@ Whole part quantities and fractional consumable equivalents are stored in `maint
 
 ## Backup compatibility
 
-Current JSON backups use format version 3; restore accepts versions 2 and 3. Restore materializes legacy vehicle insurance into independent policies, populates missing multi-vehicle task links, converts legacy document ownership into shared links, and generates missing document identities. Schema evolution is tracked in `drizzle/0000` through `drizzle/0016`.
+Current backups are ZIP64 archives with version 4 `backup.json` and original files in `assets/`. Restore also accepts legacy JSON versions 2 and 3. Restore materializes legacy insurance, multi-vehicle task links, shared document links and missing document identities.
+
+Portable snapshots contain all garage tables, image adjustment metadata and per-maintenance attachment order. ZIP asset entries have path, MIME type, byte size and SHA-256 checksums, not Base64. `server/backupZip.ts` uses archiver and yauzl for streaming disk-based staging and safe extraction into generated filenames. Missing/corrupt files and unsafe entries block restore. Recovery backups use ZIP too. Owner credentials are retained. Inserts are batched in one transaction, without a total row cap. Multipart uploads and JSON record parsing still consume memory; temporary disk capacity also matters.
 
 ## Security boundary
 

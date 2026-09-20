@@ -108,15 +108,18 @@ Document filters include `vehicleId`, `kind`, `category`, `from`, and `to`. Uplo
 - `GET /export/maintenance.csv`
 - `GET /export/all.csv`
 - `GET /export/json`
+- `GET /export/backup.zip`
 - `POST /import/preview`
 - `POST /import/json`
 - `GET /backups/:name`
 
 Omit `ids` from the PDF route to include every maintenance record. JSON import accepts multipart `file`; the commit route also requires `confirmation=REPLACE`. Export responses use attachment filenames and should be streamed to disk rather than loaded into application memory by clients.
 
+`/export/backup.zip` is the restorable ZIP64 format: version 4 `backup.json` with garage records and an asset manifest (`file`, `mimeType`, `sha256`, `sizeBytes`), plus original files in `assets/`. No Base64 is used. Both import routes accept complete ZIP files or legacy version 2/3 JSON through multipart `file`; `/import/json` retains its name for compatibility. Export returns 422 if source files are unavailable. Preview returns record `counts`, `attachmentCount`, `attachmentBytes`, and `warnings`; restore rejects unsafe/duplicate entries, missing files and failed checksums. Recovery files are ZIPs; historical JSON recovery downloads remain supported. Owner credentials and browser preferences are not exported or replaced. `/export/json` remains a legacy endpoint; Excel ZIPs are not restorable.
+
 ## Upload types and limits
 
-Allowed MIME types are JPEG, PNG, WebP, PDF, plain text, CSV, DOCX, XLSX, and ODT. Each stored upload is limited to 15 MB. The Bun server permits request bodies up to 128 MB. JSON restore accepts backups up to 120 MB.
+Allowed MIME types are JPEG, PNG, WebP, PDF, plain text, CSV, DOCX, XLSX, and ODT. Ordinary uploads remain limited to 15 MB per file. Backup/restore has no application-imposed byte, field-length, or record-count cap, including embedded files; the Bun HTTP body-size cap is disabled. Memory, runtime, disk and reverse-proxy constraints still apply. Restore inserts records in bounded SQL batches inside one transaction.
 
 ## Examples
 

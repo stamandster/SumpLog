@@ -18,7 +18,7 @@ const document: DocumentRecord = { id: 1, trackingId: "80ae1b30-d834-43cb-8d20-a
 describe("workflow accessibility regression coverage", () => {
   test("shows saved evidence actions in maintenance edit, scoped to the record", () => {
     const record = { id: 1, title: "Oil service", category: "Engine", serviceDate: "2026-09-07", mileage: 100, costCents: 1000, laborHours: 1, difficulty: 2 } as MaintenanceRecord;
-    const props = { open: true, record, vehicle: vehicles[0], parts: [], shopNames: [], onClose: () => {}, onSubmit: async () => {}, onDeleteDocument: async () => {}, documents: [document, { ...document, id: 2, name: "Oil photo", mimeType: "image/jpeg" }, { ...document, id: 3, maintenanceId: 99, name: "Unrelated photo", mimeType: "image/jpeg" }] };
+    const props = { open: true, record, vehicle: vehicles[0], parts: [], shopNames: [], onClose: () => {}, onSubmit: async () => {}, onDeleteDocument: async () => {}, documents: [document, { ...document, id: 2, name: "Oil photo", mimeType: "image/jpeg", maintenanceRecords: [{ id: 1, vehicleId: 1, title: "Oil service", category: "Engine", serviceDate: "2026-09-07", position: 0 }] }, { ...document, id: 3, maintenanceId: 99, name: "Unrelated photo", mimeType: "image/jpeg" }] };
     const html = renderToStaticMarkup(<MaintenanceDialog {...props} />);
     expect(html).toContain('aria-label="Edit photo: Oil photo"');
     expect(html).toContain('aria-label="Delete attachment: Oil photo"');
@@ -67,7 +67,9 @@ describe("workflow accessibility regression coverage", () => {
     expect(html).toContain(">Engine<");
     expect(html).toContain("1 matching document");
     expect(html).toContain("record-preview-grid");
-    expect(html).toContain('loading="lazy"');
+    expect(html).toContain('aria-label="PDF preview: Purolator warranty"');
+    expect(html).toContain('aria-busy="true"');
+    expect(html).not.toContain("<iframe");
     expect(html).toContain("PDF preview: Purolator warranty");
     const dialog = renderToStaticMarkup(<DocumentDialog open document={document} vehicles={vehicles} activeVehicleId={1} onClose={() => {}} onUpload={async () => {}} onSave={async () => {}} onDelete={async () => {}} />);
     expect(dialog).toContain("Display name");
