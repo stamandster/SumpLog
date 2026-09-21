@@ -58,10 +58,12 @@ function Show-SumpLogLinks {
 }
 
 function Test-SumpLogOwnerPassword {
-    param([string]$DatabasePath, [string]$BunPath)
+    param([string]$DatabasePath, [string]$BunPath, [string]$CheckerPath)
     if (-not (Test-Path -LiteralPath $DatabasePath -PathType Leaf)) { return $false }
     # Query only whether a credential exists; the password hash is never printed or read into PowerShell.
-    $sumpCredentialExists = & $BunPath -e 'import { Database } from "bun:sqlite"; const database = new Database(Bun.argv[1], { readonly: true }); try { process.stdout.write(database.query("SELECT 1 AS present FROM owner_credentials WHERE id = 1").get() ? "yes" : "no"); } finally { database.close(); }' $DatabasePath 2>$null
+    # Keep this in a Bun script: PowerShell can otherwise remove quote characters
+    # from a complex inline `bun -e` command before Bun evaluates it.
+    $sumpCredentialExists = & $BunPath $CheckerPath $DatabasePath 2>$null
     return $LASTEXITCODE -eq 0 -and ($sumpCredentialExists -join '').Trim() -eq 'yes'
 }
 
@@ -106,7 +108,11 @@ Push-Location -LiteralPath $sumpRoot
 try {
     $sumpConfiguredDatabase = if ($env:DATABASE_URL) { $env:DATABASE_URL } else { Join-Path $sumpRoot 'data\sumplog.db' }
     if (-not [System.IO.Path]::IsPathRooted($sumpConfiguredDatabase)) { $sumpConfiguredDatabase = Join-Path $sumpRoot $sumpConfiguredDatabase }
-    $sumpHasSavedPassword = Test-SumpLogOwnerPassword -DatabasePath $sumpConfiguredDatabase -BunPath $sumpBun
+    $sumpPasswordChecker = Join-Path $sumpRoot 'scripts\has-owner-password.ts'
+    if (-not (Test-Path -LiteralPath $sumpPasswordChecker -PathType Leaf)) {
+        throw "The bundled owner-password checker is missing: $sumpPasswordChecker"
+    }
+    $sumpHasSavedPassword = Test-SumpLogOwnerPassword -DatabasePath $sumpConfiguredDatabase -BunPath $sumpBun -CheckerPath $sumpPasswordChecker
     if (-not $sumpHasSavedPassword -and [string]::IsNullOrWhiteSpace($env:SUMPLOG_PASSWORD)) {
         $env:SUMPLOG_PASSWORD = Read-SumpLogFirstPassword
     }

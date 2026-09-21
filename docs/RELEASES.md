@@ -1,5 +1,12 @@
 # Releases
 
+## v0.2.1 — 2026-09-21
+
+Patch release for Windows first-run setup.
+
+- Fixed the `bootstrap.ps1` credential check so PowerShell reliably invokes Bun without corrupting the SQLite query.
+- First-run password setup now proceeds normally when no saved owner credential exists.
+
 ## v0.2.0 — 2026-09-20
 
 First public DIY self-hosting release.
